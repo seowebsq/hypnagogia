@@ -1,0 +1,1007 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hypnagogia</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0a12; }
+  #hud { position: fixed; left: 16px; top: 16px; color: #fff; font: 13px/1.4 monospace;
+         text-shadow: 0 1px 3px #000; user-select: none; pointer-events: none; }
+  #bar { width: 160px; height: 6px; background: #ffffff22; margin-top: 4px; }
+  #fill { height: 100%; background: #ffe9a8; width: 100%; }
+  #words { margin-top: 8px; opacity: .85; }
+  #shards { margin-top: 4px; color: #cdb8ff; }
+  #win { position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+         background: #f4f0e8; color: #211a14; font: 18px/2 monospace; text-align: center; z-index: 10; }
+  #win button { font: 15px monospace; padding: 8px 18px; margin-top: 12px; cursor: pointer;
+                background: #211a14; color: #f4f0e8; border: 0; }
+  #msg { position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%);
+         color: #fff; font: 14px monospace; text-shadow: 0 1px 4px #000;
+         opacity: 0; transition: opacity .8s; pointer-events: none; white-space: nowrap; }
+  #hint { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+          color: #fff; font: 16px monospace; background: #0a0a12cc; cursor: pointer;
+          text-align: center; white-space: pre-line; }
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none;
+           transition: opacity 1.2s; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px;
+           background: #fff; border-radius: 50%; opacity: .7; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="hud">LUCIDITY<div id="bar"><div id="fill"></div></div><div id="words"></div><div id="shards"></div></div>
+<div id="msg"></div>
+<div id="win"><div>YOU WAKE<br>the dream lets you go<br><span id="winStats"></span><br>
+<button id="again">sleep again</button></div></div>
+<div id="cross"></div>
+<div id="flash"></div>
+<div id="hint">HYPNAGOGIA — a dream that keeps rewriting itself
+
+three dream shards sleep behind singing doors
+step on loud blocks matching each door's runes, in order, to open it
+carry all three shards to the pink anchor bed to wake for good
+
+click to enter
+WASD move · arrows or mouse look · space jump · LMB break · RMB place
+pale carved blocks hold words — readable only while half-dreaming · Q picks a word
+a stairway of almost-nothing climbs to an island that exists only while dreaming
+in deep dream the inventory lies and a great eye may wheel overhead
+the frog knows the songs · don't meet its eyes</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------- world ----------
+const SX = 40, SY = 24, SZ = 40;
+const vox = new Uint8Array(SX * SY * SZ);           // 0 air, else block id
+const idx = (x, y, z) => x + SX * (z + SZ * y);
+const inB = (x, y, z) => x >= 0 && x < SX && y >= 0 && y < SY && z >= 0 && z < SZ;
+const get = (x, y, z) => inB(x, y, z) ? vox[idx(x, y, z)] : 0;
+
+// value noise heightmap
+function hash(x, z) { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); }
+function noise(x, z) {
+  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  return hash(xi, zi) * (1 - u) * (1 - v) + hash(xi + 1, zi) * u * (1 - v) +
+         hash(xi, zi + 1) * (1 - u) * v + hash(xi + 1, zi + 1) * u * v;
+}
+let seed = 0;
+function colHeight(x, z) {
+  const n = noise((x + seed) / 9, (z + seed) / 9) * 0.7 + noise((x + seed) / 3.1, (z + seed) / 3.1) * 0.3;
+  return 2 + Math.floor(n * 9);
+}
+function genColumn(x, z) {
+  const h = colHeight(x, z);
+  for (let y = 0; y < SY; y++) vox[idx(x, y, z)] = y < h ? (y === h - 1 ? 1 : y > h - 4 ? 2 : 3) : 0;
+}
+for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++) genColumn(x, z);
+
+// anchor bed near centre
+const AX = SX >> 1, AZ = SZ >> 1;
+const anchorY = colHeight(AX, AZ);
+vox[idx(AX, anchorY, AZ)] = 4;
+
+// ---------- notes ----------
+const SCALE = [0, 3, 5, 7, 10]; // pentatonic
+const NOTE_NAMES = ['RED', 'GOLD', 'GREEN', 'BLUE', 'VIOLET'];
+const NOTE_HUES = [0.02, 0.12, 0.33, 0.58, 0.83];
+function noteOf(x, z) { return Math.abs(x * 7 + z * 13) % 5; }
+function noteColor(n) { return new THREE.Color().setHSL(NOTE_HUES[n], 0.9, 0.62); }
+
+// block palettes (lerped by height for the depth palette shift)
+const PAL = {
+  1: y => new THREE.Color().setHSL(0.30 - y * 0.006, 0.45, 0.42 + y * 0.012), // grass
+  2: y => new THREE.Color().setHSL(0.07, 0.30, 0.30 + y * 0.01),              // dirt
+  3: y => new THREE.Color().setHSL(0.65, 0.12, 0.22 + y * 0.008),             // stone
+  4: () => new THREE.Color().setHSL(0.88, 0.85, 0.62),                        // anchor bed
+  5: () => new THREE.Color().setHSL(0.13, 0.25, 0.88),                        // carved word block
+  6: () => new THREE.Color().setHSL(0.09, 0.95, 0.60),                        // warm
+  7: () => new THREE.Color().setHSL(0.52, 0.95, 0.60),                        // backwards
+  8: (y, x, z) => noteColor(noteOf(x, z)),                                    // loud — tinted by its note
+  9: () => new THREE.Color().setHSL(0.55, 0.30, 0.82),                        // ephemeral note-platform
+  10: () => new THREE.Color().setHSL(0.74, 0.50, 0.14),                       // scar — where you hit zero
+  11: () => new THREE.Color().setHSL(0.70, 0.60, 0.78),                       // dream shard
+  12: () => new THREE.Color().setHSL(0.75, 0.70, 0.45),                       // singing seal
+  13: () => new THREE.Color().setHSL(0.50, 0.70, 0.85),                       // almost-nothing (half-dream only)
+  14: () => new THREE.Color().setHSL(0.93, 0.90, 0.60),                       // dreamfruit
+};
+
+// ---------- words & fusion ----------
+const WORDS = ['warm', 'backwards', 'loud'];
+const WORD_ID = { warm: 6, backwards: 7, loud: 8 };
+const ID_WORD = { 6: 'warm', 7: 'backwards', 8: 'loud' };
+const words = {};            // inventory: word -> count
+let selWord = null;          // null = place plain blocks
+const enchant = new Map();   // vox index -> potency (1 + dream at placement)
+
+function placeWordBlocks() { // 8 carved blocks scattered on the surface, away from the anchor
+  for (let i = 0; i < 8; i++) {
+    const x = (Math.random() * SX) | 0, z = (Math.random() * SZ) | 0;
+    if (Math.abs(x - AX) < 4 && Math.abs(z - AZ) < 4) continue;
+    let y = SY - 2; while (y > 0 && !get(x, y, z)) y--;
+    if (get(x, y, z) && get(x, y, z) < 4) vox[idx(x, y + 1, z)] = 5;
+  }
+}
+
+const wordsEl = document.getElementById('words'), msgEl = document.getElementById('msg');
+let msgT;
+function showMsg(t) {
+  msgEl.textContent = t; msgEl.style.opacity = 1;
+  clearTimeout(msgT); msgT = setTimeout(() => msgEl.style.opacity = 0, 2400);
+}
+function updateWordsHUD() {
+  const have = WORDS.filter(w => words[w] > 0);
+  let name = w => w, count = w => words[w];
+  if (uDream.value > 0.6 && Math.random() < 0.5) { // deep dream: the inventory lies
+    const sh = [...have].sort(() => Math.random() - 0.5);
+    name = w => sh[have.indexOf(w)];
+    count = w => Math.max(1, words[w] + ((Math.random() * 5) | 0) - 2);
+  }
+  wordsEl.textContent = have.length
+    ? have.map(w => (w === selWord ? '▶' : '') + name(w) + '×' + count(w)).join('  ') + (selWord ? '' : '  ▶plain')
+    : '';
+}
+function updateShards() {
+  document.getElementById('shards').textContent = '◆ shards ' + shards + '/3';
+}
+function winGame() {
+  persist();
+  document.getElementById('winStats').textContent =
+    'wakes: ' + stats.wakes + ' · words learned: ' + (stats.learned || 0) + ' · memories kept: ' + archive.length;
+  document.getElementById('win').style.display = 'flex';
+  playing = false;
+}
+document.getElementById('again').onclick = () => { // a new dream; the archive remembers
+  document.getElementById('win').style.display = 'none';
+  shards = 0; updateShards();
+  doors.length = 0;
+  seed += 101.3;
+  for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++)
+    if (!(x === AX && z === AZ)) genColumn(x, z);
+  vox[idx(AX, anchorY, AZ)] = 4;
+  enchant.clear(); placedLog.length = 0;
+  spawnVaults(); placeFrog(); placeWordBlocks(); spawnIsland(); rollUnstable(); rollRegions();
+  lucidity = 100;
+  player.pos.set(AX + 0.5, anchorY + 3, AZ + 2.5); player.vel.set(0, 0, 0);
+  drawFruitSky();
+  rebuild();
+  setPlaying(true);
+};
+function cycleWord() {
+  const have = [...WORDS.filter(w => words[w] > 0), null];
+  if (have.length < 2) return;
+  selWord = have[(have.indexOf(selWord) + 1) % have.length];
+  updateWordsHUD();
+}
+
+// ---------- the world remembers ----------
+const placedLog = []; // everything you placed since the last wake
+// long-term memory: archive of past builds, kept across wakes AND sessions
+const save = (() => { try { return JSON.parse(localStorage.hypnagogia || '{}'); } catch { return {}; } })();
+const archive = Array.isArray(save.archive) ? save.archive : [];
+const stats = save.stats || { wakes: 0, learned: 0 };
+if (save.words) for (const w of WORDS) words[w] = save.words[w] | 0;
+function persist() { try { localStorage.hypnagogia = JSON.stringify({ archive, stats, words }); } catch {} }
+function surfaceY(x, z) { let y = SY - 1; while (y > 0 && !get(x, y, z)) y--; return y + 1; }
+function stampScar(s) { // a few dark blocks where you hit zero
+  for (let i = 0; i < 4; i++) {
+    const x = Math.max(0, Math.min(SX - 1, s.x + ((Math.random() * 3) | 0) - 1)),
+          z = Math.max(0, Math.min(SZ - 1, s.z + ((Math.random() * 3) | 0) - 1));
+    const y = surfaceY(x, z);
+    if (y < SY) vox[idx(x, y, z)] = 10;
+  }
+}
+function stampBlocks(blocks) { // the dream rebuilds what you built, elsewhere and wrong
+  const mn = { x: 1e9, y: 1e9, z: 1e9 };
+  for (const b of blocks) { mn.x = Math.min(mn.x, b.x); mn.y = Math.min(mn.y, b.y); mn.z = Math.min(mn.z, b.z); }
+  const cx = 2 + ((Math.random() * (SX - 12)) | 0), cz = 2 + ((Math.random() * (SZ - 12)) | 0);
+  const cy = surfaceY(cx, cz);
+  for (const b of blocks) {
+    if (Math.random() < 0.3) continue;                                   // half melted
+    let x = cx + b.x - mn.x, y = cy + b.y - mn.y, z = cz + b.z - mn.z;
+    if (Math.random() < 0.2) { x += ((Math.random() * 3) | 0) - 1; z += ((Math.random() * 3) | 0) - 1; } // warped
+    const id = Math.random() < 0.15 ? 10 : b.id;                         // scorched in places
+    if (inB(x, y, z) && !vox[idx(x, y, z)] && !inVault(x, z)) vox[idx(x, y, z)] = id;
+    // ponytail: copied word blocks keep no enchant entry — warm copies are dead, but
+    // backwards/loud copies still trigger underfoot: traps built in your style, for free
+  }
+}
+function stampBuild() {
+  if (placedLog.length >= 3) {
+    archive.push({ blocks: placedLog.slice(0, 60).map(b => ({ ...b })) }); // remember it forever
+    if (archive.length > 20) archive.shift();
+    stampBlocks(placedLog);
+    setTimeout(() => showMsg('something has rebuilt your work, wrong'), 1600);
+  } else if (archive.length && Math.random() < 0.6) {
+    // nothing new built — an old memory resurfaces instead
+    stampBlocks(archive[(Math.random() * archive.length) | 0].blocks);
+    setTimeout(() => showMsg('this place is built from something you once made'), 1600);
+  }
+  placedLog.length = 0;
+}
+
+// ---------- the echo ----------
+const ecv = document.createElement('canvas'); ecv.width = 64; ecv.height = 96;
+const ec = ecv.getContext('2d');
+ec.fillStyle = '#0a0612';
+ec.beginPath(); ec.ellipse(32, 20, 13, 17, 0, 0, Math.PI * 2); ec.fill();     // head
+ec.beginPath(); ec.moveTo(20, 30); ec.quadraticCurveTo(8, 62, 14, 92);        // drippy body
+ec.lineTo(22, 78); ec.lineTo(28, 94); ec.lineTo(36, 76); ec.lineTo(42, 95); ec.lineTo(50, 90);
+ec.quadraticCurveTo(56, 60, 44, 30); ec.closePath(); ec.fill();
+ec.fillStyle = '#e8e0ff';                                                     // pale eyes
+ec.beginPath(); ec.arc(26, 18, 2.6, 0, Math.PI * 2); ec.arc(38, 18, 2.6, 0, Math.PI * 2); ec.fill();
+const echo = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(ecv), transparent: true, opacity: 0 }));
+echo.scale.set(1.8, 2.7, 1);
+echo.position.set(AX + 10, 10, AZ + 10);
+let echoWant = WORDS[(Math.random() * WORDS.length) | 0], echoAnnounced = false, echoAway = 0;
+function echoTick(dt, dream) {
+  echoAway -= dt;
+  const active = dream > 0.25 && echoAway <= 0;
+  echo.material.opacity += ((active ? 0.5 + dream * 0.45 : 0) - echo.material.opacity) * Math.min(1, dt * 2);
+  if (!active) return;
+  const dx = player.pos.x - echo.position.x, dz = player.pos.z - echo.position.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist > 7.5) { echo.position.x += dx / dist * 1.5 * dt; echo.position.z += dz / dist * 1.5 * dt; } // it stalks
+  const sy = surfaceY(Math.max(0, Math.min(SX - 1, Math.floor(echo.position.x))),
+                      Math.max(0, Math.min(SZ - 1, Math.floor(echo.position.z))));
+  echo.position.y += (sy + 1.1 + Math.sin(uTime.value * 1.3) * 0.25 - echo.position.y) * Math.min(1, dt * 3);
+  if (dist < 9 && !echoAnnounced) { echoAnnounced = true; showMsg('the echo hums — it wants something ' + echoWant.toUpperCase()); }
+  if (dist < 6) lucidity -= 2.5 * dt; // its attention is heavy
+}
+
+// ---------- the frog with hypnotising eyes ----------
+const fcv = document.createElement('canvas'); fcv.width = 64; fcv.height = 64;
+const fc = fcv.getContext('2d');
+fc.fillStyle = '#3f7d2e';
+fc.beginPath(); fc.ellipse(32, 44, 26, 17, 0, 0, Math.PI * 2); fc.fill();     // body
+fc.beginPath(); fc.ellipse(12, 56, 8, 5, 0, 0, Math.PI * 2);                  // legs
+fc.ellipse(52, 56, 8, 5, 0, 0, Math.PI * 2); fc.fill();
+for (const ex of [19, 45]) {                                                  // bulging eyes
+  fc.fillStyle = '#3f7d2e'; fc.beginPath(); fc.arc(ex, 24, 13, 0, Math.PI * 2); fc.fill();
+  fc.fillStyle = '#f3ecd8'; fc.beginPath(); fc.arc(ex, 22, 10, 0, Math.PI * 2); fc.fill();
+  fc.strokeStyle = '#c23030'; fc.lineWidth = 1.8;                             // the spiral
+  fc.beginPath();
+  for (let a = 0; a < 14; a += 0.3) { const r = a * 0.62; fc.lineTo(ex + Math.cos(a) * r, 22 + Math.sin(a) * r); }
+  fc.stroke();
+  fc.fillStyle = '#111'; fc.beginPath(); fc.arc(ex, 22, 1.6, 0, Math.PI * 2); fc.fill();
+}
+fc.strokeStyle = '#2a5520'; fc.lineWidth = 2;
+fc.beginPath(); fc.moveTo(18, 44); fc.quadraticCurveTo(32, 50, 46, 44); fc.stroke(); // mouth
+const frog = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(fcv), transparent: true }));
+frog.scale.set(1.9, 1.9, 1);
+let frogWarnCool = 0, frogCroakCool = 0;
+function placeFrog() {
+  for (let i = 0; i < 40; i++) {
+    const x = 2 + ((Math.random() * (SX - 4)) | 0), z = 2 + ((Math.random() * (SZ - 4)) | 0);
+    if (Math.hypot(x - AX, z - AZ) < 12 || inVault(x, z)) continue;
+    frog.position.set(x + 0.5, surfaceY(x, z) + 0.8, z + 0.5);
+    return;
+  }
+}
+function frogTick(dt, dream) {
+  frogWarnCool -= dt; frogCroakCool -= dt;
+  frog.scale.y = 1.9 + Math.sin(uTime.value * 2.1) * 0.08; // it breathes
+  const sy = surfaceY(Math.max(0, Math.min(SX - 1, Math.floor(frog.position.x))),
+                      Math.max(0, Math.min(SZ - 1, Math.floor(frog.position.z))));
+  frog.position.y += (sy + 0.8 - frog.position.y) * Math.min(1, dt * 3);
+  if (dream < 0.1) return;                                   // too awake to be caught
+  const d = _bc.copy(frog.position).sub(camera.position);
+  const dist = d.length();
+  if (dist > 9) return;
+  camera.getWorldDirection(_fw);
+  if (d.normalize().dot(_fw) > 0.55) {                       // you met its eyes
+    lucidity -= 4 * dt;
+    player.pos.x += (frog.position.x - player.pos.x) * 0.25 * dt;
+    player.pos.z += (frog.position.z - player.pos.z) * 0.25 * dt;
+    if (frogWarnCool < 0) { frogWarnCool = 8; showMsg('its eyes are spirals — look away'); }
+  }
+}
+function frogCroak() {
+  frogCroakCool = 6;
+  playNote(0, 98); setTimeout(() => playNote(0, 82), 170);
+  let best = null, bd = 1e9;
+  for (const d of doors) if (!d.open) {
+    const dd = Math.hypot(d.cx - frog.position.x, d.cz - frog.position.z);
+    if (dd < bd) { bd = dd; best = d; }
+  }
+  showMsg(best ? 'the frog croaks a door’s song: ' + best.melody.map(n => NOTE_NAMES[n]).join(' · ')
+               : 'the frog blinks — every door already sings');
+}
+
+// ---------- the moth that steals words ----------
+const mcv = document.createElement('canvas'); mcv.width = 48; mcv.height = 48;
+const mc = mcv.getContext('2d');
+mc.fillStyle = '#d8cfae';
+mc.beginPath(); mc.moveTo(24, 24); mc.lineTo(2, 8); mc.lineTo(10, 30); mc.closePath(); mc.fill();   // wings
+mc.beginPath(); mc.moveTo(24, 24); mc.lineTo(46, 8); mc.lineTo(38, 30); mc.closePath(); mc.fill();
+mc.fillStyle = '#6b5d4f'; mc.fillRect(22, 14, 4, 22);                                               // body
+const moth = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(mcv), transparent: true, opacity: 0 }));
+moth.scale.set(0.8, 0.8, 1);
+moth.position.set(AX - 8, 10, AZ - 8);
+let mothCarrying = null, mothT = 0;
+const mothTarget = new THREE.Vector3();
+function mothTick(dt, dream) {
+  const active = dream > 0.2;
+  moth.material.opacity += ((active ? 0.45 + dream * 0.45 : 0) - moth.material.opacity) * Math.min(1, dt * 2);
+  if (!active) return;
+  mothT -= dt;
+  if (mothT < 0) {
+    mothT = 2.5 + Math.random() * 3;
+    mothTarget.set(player.pos.x + (Math.random() - 0.5) * 16, 0, player.pos.z + (Math.random() - 0.5) * 16);
+  }
+  const to = mothCarrying
+    ? _bc.copy(moth.position).sub(player.pos).setY(0)       // flees with its prize
+    : _bc.copy(mothTarget).sub(moth.position).setY(0);
+  const l = to.length();
+  if (l > 0.5) { to.multiplyScalar(dt * (mothCarrying ? 3.0 : 2.2) / l); moth.position.x += to.x; moth.position.z += to.z; }
+  const sy = surfaceY(Math.max(0, Math.min(SX - 1, Math.floor(moth.position.x))),
+                      Math.max(0, Math.min(SZ - 1, Math.floor(moth.position.z))));
+  moth.position.y += (sy + 2 + Math.sin(uTime.value * 7) * 0.5 - moth.position.y) * Math.min(1, dt * 4);
+  if (moth.position.distanceTo(camera.position) < 1.4) {
+    if (mothCarrying) {
+      words[mothCarrying] = (words[mothCarrying] || 0) + 2;
+      showMsg('you catch the moth — it gives back ' + mothCarrying.toUpperCase() + ', doubled');
+      mothCarrying = null;
+      moth.position.x += 15; updateWordsHUD();
+    } else {
+      const have = WORDS.filter(w => words[w] > 0);
+      if (have.length) {
+        mothCarrying = have[(Math.random() * have.length) | 0];
+        words[mothCarrying]--;
+        showMsg('a moth takes ' + mothCarrying.toUpperCase() + ' from your mouth — catch it');
+        updateWordsHUD();
+      }
+      moth.position.x -= 10;
+    }
+  }
+}
+
+let AC, drone;
+function droneTick(dream) { // two sines drifting apart as you sink
+  if (!AC) return;
+  if (!drone) {
+    const o1 = AC.createOscillator(), o2 = AC.createOscillator(), g = AC.createGain();
+    o1.frequency.value = 54; o2.frequency.value = 54.6;
+    g.gain.value = 0;
+    o1.connect(g); o2.connect(g); g.connect(AC.destination);
+    o1.start(); o2.start();
+    drone = { o1, o2, g };
+  }
+  drone.g.gain.value = dream * 0.05;
+  drone.o1.frequency.value = 54 + dream * 18;
+  drone.o2.frequency.value = 54.6 + dream * 24;
+}
+function playNote(note, freq) {
+  AC ??= new AudioContext();
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'triangle';
+  o.frequency.value = freq || 220 * Math.pow(2, SCALE[note] / 12);
+  g.gain.setValueAtTime(0.15, AC.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, AC.currentTime + 0.5);
+  o.connect(g).connect(AC.destination);
+  o.start(); o.stop(AC.currentTime + 0.5);
+}
+
+// ---------- singing doors & shards ----------
+let shards = 0;
+const doors = [];
+function buildVault(cx, cz) {
+  const y0 = surfaceY(cx, cz);
+  if (y0 > SY - 5) return false;
+  const melody = [0, 0, 0].map(() => (Math.random() * 5) | 0);
+  for (let x = cx - 2; x <= cx + 2; x++) for (let z = cz - 2; z <= cz + 2; z++) {
+    vox[idx(x, y0 - 1, z)] = 3; // floor
+    for (let y = y0; y <= y0 + 3; y++) {
+      const wall = x === cx - 2 || x === cx + 2 || z === cz - 2 || z === cz + 2 || y === y0 + 3;
+      vox[idx(x, y, z)] = wall ? 3 : 0;
+    }
+  }
+  const seal = [idx(cx - 2, y0, cz), idx(cx - 2, y0 + 1, cz)]; // doorway, facing -x
+  for (const k of seal) vox[k] = 12;
+  for (let i = 0; i < 3; i++) vox[idx(cx - 2, y0 + 2, cz - 1 + i)] = 20 + melody[i]; // runes, in order
+  vox[idx(cx, y0, cz)] = 11;                                   // the shard
+  vox[idx(cx + 1, y0, cz + 1)] = 5;                            // and some words to find
+  vox[idx(cx - 1, y0, cz + 1)] = 5;
+  doors.push({ cx, cz, melody, heard: [], open: false, seal, x0: cx - 2, x1: cx + 2, z0: cz - 2, z1: cz + 2 });
+  return true;
+}
+function spawnVaults() {
+  let tries = 0;
+  while (doors.length < 3 && tries++ < 60) {
+    const cx = 3 + ((Math.random() * (SX - 6)) | 0), cz = 3 + ((Math.random() * (SZ - 6)) | 0);
+    if (Math.hypot(cx - AX, cz - AZ) < 8) continue;
+    if (doors.some(d => Math.hypot(cx - d.cx, cz - d.cz) < 8)) continue;
+    buildVault(cx, cz);
+  }
+}
+function inVault(x, z) {
+  return doors.some(d => !d.open && x >= d.x0 && x <= d.x1 && z >= d.z0 && z <= d.z1);
+}
+
+// ---------- the half-dream island (exists only while dreaming) ----------
+const DREAM_GATE = 0.45;
+let dreamPhase = true;        // island blocks currently in the world
+const dreamHidden = [];       // [vox index, id] while phased out
+function spawnIsland() {
+  dreamHidden.length = 0; dreamPhase = true; // stale phased-out copies die on respawn
+  const ix = Math.min(SX - 5, AX + 10), iz = Math.min(SZ - 5, AZ + 10), iy = 14;
+  for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) {
+    if (x * x + z * z > 10) continue;
+    vox[idx(ix + x, iy, iz + z)] = 13;
+    if (x * x + z * z <= 2) vox[idx(ix + x, iy - 1, iz + z)] = 13; // belly
+  }
+  vox[idx(ix, iy + 1, iz)] = 14;                 // the dreamfruit
+  vox[idx(ix - 2, iy + 1, iz)] = 5;              // carved words kept up here
+  vox[idx(ix, iy + 1, iz - 2)] = 5;
+  // a stairway of almost-nothing from the ground up
+  let sx = AX + 3, sz = AZ + 3, y = surfaceY(sx, sz);
+  while (sx !== ix - 3 || sz !== iz) {
+    if (sx < ix - 3) sx++; else if (sz < iz) sz++;
+    if (y < iy - 1) y++;
+    if (inB(sx, y, sz) && !vox[idx(sx, y, sz)]) vox[idx(sx, y, sz)] = 13;
+  }
+}
+function islandTick(dream) {
+  const want = dream > DREAM_GATE;
+  if (want === dreamPhase) return;
+  dreamPhase = want;
+  if (!want) {
+    for (let i = 0; i < vox.length; i++)
+      if (vox[i] === 13 || vox[i] === 14) { dreamHidden.push([i, vox[i]]); vox[i] = 0; }
+    if (dreamHidden.length) showMsg('the stairway was never there');
+  } else {
+    for (const [k, id] of dreamHidden) if (!vox[k]) vox[k] = id;
+    dreamHidden.length = 0;
+    showMsg('a stairway of almost-nothing resolves out of the air');
+  }
+  rebuild();
+}
+function doorHear(note, x, z) {
+  for (const d of doors) {
+    if (d.open || Math.hypot(x - d.cx, z - d.cz) > 10) continue;
+    d.heard.push(note);
+    if (d.heard.length > 3) d.heard.shift();
+    if (d.heard.length === 3 && d.heard.every((n, i) => n === d.melody[i])) {
+      d.open = true;
+      for (const k of d.seal) if (vox[k] === 12) vox[k] = 0;
+      rebuild();
+      showMsg('the door drinks the song and opens');
+    }
+  }
+}
+
+// ---------- mesh (exposed faces only, rebuilt on edit) ----------
+const FACES = [
+  { d: [1, 0, 0],  c: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
+  { d: [-1, 0, 0], c: [[0,0,1],[0,1,1],[0,1,0],[0,0,0]] },
+  { d: [0, 1, 0],  c: [[0,1,0],[0,1,1],[1,1,1],[1,1,0]] },
+  { d: [0, -1, 0], c: [[0,0,0],[1,0,0],[1,0,1],[0,0,1]] },
+  { d: [0, 0, 1],  c: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
+  { d: [0, 0, -1], c: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
+];
+let worldMesh;
+function rebuild() {
+  const pos = [], nor = [], col = [], uv = [], ind = [];
+  let n = 0;
+  for (let y = 0; y < SY; y++) for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
+    const b = vox[idx(x, y, z)];
+    if (!b) continue;
+    const c = b >= 20 ? noteColor(b - 20) : PAL[b](y, x, z); // 20+ are door runes
+    for (const f of FACES) {
+      if (get(x + f.d[0], y + f.d[1], z + f.d[2])) continue;
+      for (const v of f.c) {
+        pos.push(x + v[0], y + v[1], z + v[2]);
+        nor.push(...f.d);
+        col.push(c.r, c.g, c.b);
+      }
+      uv.push(0, 0, 1, 0, 1, 1, 0, 1);
+      ind.push(n, n + 1, n + 2, n, n + 2, n + 3);
+      n += 4;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(ind);
+  if (worldMesh) { worldMesh.geometry.dispose(); worldMesh.geometry = g; }
+  else { worldMesh = new THREE.Mesh(g, mat); scene.add(worldMesh); }
+}
+
+// ---------- scene ----------
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0a12, 20, 70);
+scene.background = new THREE.Color(0x0a0a12);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.4);
+sun.position.set(0.6, 1, 0.4);
+scene.add(sun);
+scene.add(echo); scene.add(frog); scene.add(moth);
+
+// ---------- fruit sky (close-up flesh, redrawn each wake) ----------
+const skyCv = document.createElement('canvas'); skyCv.width = skyCv.height = 512;
+const skyTex = new THREE.CanvasTexture(skyCv);
+function drawFruitSky() {
+  const g = skyCv.getContext('2d'), W = 512, C = 256;
+  const kind = (Math.random() * 4) | 0;
+  if (kind === 0) { // kiwi
+    const rg = g.createRadialGradient(C, C, 20, C, C, 300);
+    rg.addColorStop(0, '#f2f7d8'); rg.addColorStop(0.55, '#9cc653'); rg.addColorStop(1, '#45701f');
+    g.fillStyle = rg; g.fillRect(0, 0, W, W);
+    g.strokeStyle = 'rgba(255,255,255,0.45)'; g.lineWidth = 2;
+    for (let i = 0; i < 44; i++) {
+      const a = i / 44 * Math.PI * 2;
+      g.beginPath(); g.moveTo(C + Math.cos(a) * 30, C + Math.sin(a) * 30);
+      g.lineTo(C + Math.cos(a + 0.05) * 230, C + Math.sin(a + 0.05) * 230); g.stroke();
+    }
+    g.fillStyle = '#1c1408';
+    for (let i = 0; i < 36; i++) {
+      const a = Math.random() * Math.PI * 2, r = 140 + Math.random() * 70;
+      g.save(); g.translate(C + Math.cos(a) * r, C + Math.sin(a) * r); g.rotate(a);
+      g.beginPath(); g.ellipse(0, 0, 3, 6, 0, 0, Math.PI * 2); g.fill(); g.restore();
+    }
+  } else if (kind === 1) { // orange wedges
+    for (let i = 0; i < 12; i++) {
+      g.fillStyle = `hsl(28, 85%, ${50 + (i % 2) * 10}%)`;
+      g.beginPath(); g.moveTo(C, C);
+      g.arc(C, C, 380, i / 12 * Math.PI * 2, (i + 1) / 12 * Math.PI * 2); g.closePath(); g.fill();
+    }
+    g.strokeStyle = 'rgba(255,245,230,0.8)'; g.lineWidth = 7;
+    for (let i = 0; i < 12; i++) {
+      const a = i / 12 * Math.PI * 2;
+      g.beginPath(); g.moveTo(C, C); g.lineTo(C + Math.cos(a) * 380, C + Math.sin(a) * 380); g.stroke();
+    }
+    g.fillStyle = '#fff3e4'; g.beginPath(); g.arc(C, C, 26, 0, Math.PI * 2); g.fill();
+  } else if (kind === 3) { // the eye
+    g.fillStyle = '#efe6e0'; g.fillRect(0, 0, W, W);
+    g.strokeStyle = 'rgba(190,60,60,0.45)'; g.lineWidth = 1.5;
+    for (let i = 0; i < 26; i++) { // veins creeping inward
+      g.beginPath(); g.moveTo(Math.random() * W, Math.random() * W);
+      g.quadraticCurveTo(Math.random() * W, Math.random() * W,
+        C + (Math.random() - 0.5) * 320, C + (Math.random() - 0.5) * 320);
+      g.stroke();
+    }
+    const rg = g.createRadialGradient(C, C, 20, C, C, 170);
+    rg.addColorStop(0, '#2a1a3e'); rg.addColorStop(0.75, '#7d5a9e'); rg.addColorStop(1, '#3e2a52');
+    g.fillStyle = rg; g.beginPath(); g.arc(C, C, 150, 0, Math.PI * 2); g.fill(); // iris
+    g.strokeStyle = 'rgba(255,255,255,0.25)'; g.lineWidth = 1;
+    for (let i = 0; i < 60; i++) {
+      const a = Math.random() * Math.PI * 2;
+      g.beginPath(); g.moveTo(C + Math.cos(a) * 55, C + Math.sin(a) * 55);
+      g.lineTo(C + Math.cos(a) * 148, C + Math.sin(a) * 148); g.stroke();
+    }
+    g.fillStyle = '#0a0508'; g.beginPath(); g.arc(C, C, 52, 0, Math.PI * 2); g.fill(); // pupil
+    g.fillStyle = 'rgba(255,255,255,0.8)'; g.beginPath(); g.arc(C - 18, C - 20, 10, 0, Math.PI * 2); g.fill();
+  } else { // dragonfruit
+    g.fillStyle = '#f6eef3'; g.fillRect(0, 0, W, W);
+    const rg = g.createRadialGradient(C, C, 150, C, C, 360);
+    rg.addColorStop(0, 'rgba(216,41,122,0)'); rg.addColorStop(1, 'rgba(216,41,122,0.85)');
+    g.fillStyle = rg; g.fillRect(0, 0, W, W);
+    g.fillStyle = '#17120e';
+    for (let i = 0; i < 300; i++) {
+      g.beginPath(); g.arc(Math.random() * W, Math.random() * W, 1.6 + Math.random() * 1.4, 0, Math.PI * 2); g.fill();
+    }
+  }
+  for (let i = 0; i < 3500; i++) { // photo grain
+    g.fillStyle = Math.random() < 0.5 ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.05)';
+    g.fillRect(Math.random() * W, Math.random() * W, 1.3, 1.3);
+  }
+  skyTex.needsUpdate = true;
+}
+drawFruitSky();
+const skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, fog: false, depthWrite: false });
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(140, 24, 16), skyMat);
+scene.add(skyDome);
+
+// photo-junk grain on every block face
+const grainCv = document.createElement('canvas'); grainCv.width = grainCv.height = 64;
+{
+  const g = grainCv.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 700; i++) {
+    g.fillStyle = `rgba(0,0,0,${0.03 + Math.random() * 0.09})`;
+    g.beginPath(); g.arc(Math.random() * 64, Math.random() * 64, 0.6 + Math.random() * 1.6, 0, Math.PI * 2); g.fill();
+  }
+  for (let i = 0; i < 14; i++) { // pores
+    g.fillStyle = 'rgba(30,20,20,0.25)';
+    g.beginPath(); g.arc(Math.random() * 64, Math.random() * 64, 1.2 + Math.random() * 1.2, 0, Math.PI * 2); g.fill();
+  }
+}
+const grainTex = new THREE.CanvasTexture(grainCv);
+
+// lucidity-driven shader injection: breathing vertices + hue drift
+const uTime = { value: 0 }, uDream = { value: 0 };   // uDream = 1 - lucidity/100
+// flipped-gravity regions: 4x4 grid of 10x10 cells, rerolled each wake
+const REG = 10, RW = 4;
+const flipArr = new Float32Array(RW * RW);
+function rollRegions() { for (let i = 0; i < flipArr.length; i++) flipArr[i] = Math.random() < 0.3 ? 1 : 0; }
+rollRegions();
+const GRAV_GATE = 0.55; // dream level where gravity starts flipping
+const mat = new THREE.MeshLambertMaterial({ vertexColors: true, map: grainTex });
+mat.onBeforeCompile = s => {
+  s.uniforms.uTime = uTime; s.uniforms.uDream = uDream;
+  s.uniforms.uFlip = { value: flipArr };
+  s.vertexShader = 'uniform float uTime, uDream;\nvarying vec3 vWorldPos;\n' + s.vertexShader.replace(
+    '#include <begin_vertex>',
+    `#include <begin_vertex>
+     vWorldPos = position;
+     transformed += normal * sin(uTime * 1.7 + position.x * 0.9 + position.y * 1.3 + position.z * 0.7)
+                  * uDream * uDream * 0.22;`);
+  s.fragmentShader = ('uniform float uTime, uDream;\nuniform float uFlip[16];\nvarying vec3 vWorldPos;\n' +
+    `vec3 hueShift(vec3 c, float a) {
+       const vec3 k = vec3(0.57735);
+       return c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
+     }\n` + s.fragmentShader).replace(
+    '#include <dithering_fragment>',
+    `gl_FragColor.rgb = hueShift(gl_FragColor.rgb,
+        sin(uTime * 0.37 + gl_FragCoord.y * 0.002) * uDream * 2.2);
+     // inverted pulsing tint marks flipped-gravity regions in deep dream
+     float rx = clamp(floor(vWorldPos.x / 10.0), 0.0, 3.0);
+     float rz = clamp(floor(vWorldPos.z / 10.0), 0.0, 3.0);
+     float gflip = uFlip[int(rx) + int(rz) * 4] * smoothstep(0.45, 0.6, uDream);
+     gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0) - gl_FragColor.rgb,
+                            gflip * (0.55 + 0.2 * sin(uTime * 2.3)));
+     #include <dithering_fragment>`);
+};
+rebuild();
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const after = new AfterimagePass(0);
+composer.addPass(after);
+composer.addPass(new OutputPass());
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- player ----------
+const controls = new PointerLockControls(camera, document.body);
+const hint = document.getElementById('hint');
+let playing = false;
+function setPlaying(on) { playing = on; hint.style.display = on ? 'none' : 'flex'; }
+hint.onclick = () => { AC ??= new AudioContext(); controls.lock(); setPlaying(true); }; // ponytail: optimistic; pointer lock denied (file://, embedded pane) still plays via arrow-key look
+controls.addEventListener('unlock', () => setPlaying(false));
+addEventListener('keydown', e => {
+  if (e.code === 'Escape') setPlaying(false);
+  if ((e.code === 'KeyQ' || e.code === 'Tab') && playing) { e.preventDefault(); cycleWord(); }
+});
+
+const player = { pos: new THREE.Vector3(AX + 0.5, anchorY + 3, AZ + 2.5), vel: new THREE.Vector3(), onGround: false };
+const keys = {};
+addEventListener('keydown', e => keys[e.code] = true);
+addEventListener('keyup', e => keys[e.code] = false);
+
+const R = 0.3, H = 1.7;
+function solidAt(p) {
+  for (const dx of [-R, R]) for (const dz of [-R, R]) for (const dy of [0.1, H * 0.5, H - 0.1])
+    if (get(Math.floor(p.x + dx), Math.floor(p.y + dy), Math.floor(p.z + dz))) return true;
+  return false;
+}
+const look = new THREE.Euler(0, 0, 0, 'YXZ');
+function movePlayer(dt) {
+  // arrow-key look (fallback + always available)
+  if (keys.ArrowLeft || keys.ArrowRight || keys.ArrowUp || keys.ArrowDown) {
+    look.setFromQuaternion(camera.quaternion);
+    look.y += ((keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0)) * 2.2 * dt;
+    look.x += ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) * 1.6 * dt;
+    look.x = Math.max(-1.45, Math.min(1.45, look.x));
+    camera.quaternion.setFromEuler(look);
+  }
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0));
+  const wish = new THREE.Vector3();
+  if (keys.KeyW) wish.add(fwd); if (keys.KeyS) wish.sub(fwd);
+  if (keys.KeyD) wish.add(right); if (keys.KeyA) wish.sub(right);
+  wish.normalize().multiplyScalar(5.5);
+  player.vel.x = wish.x; player.vel.z = wish.z;
+  const gs = gravSign();
+  player.vel.y -= 22 * dt * gs;
+  if (keys.Space && player.onGround) { player.vel.y = 8 * gs; player.onGround = false; }
+  // per-axis resolve
+  for (const ax of ['x', 'y', 'z']) {
+    const p = player.pos.clone();
+    p[ax] += player.vel[ax] * dt;
+    if (solidAt(p)) {
+      if (ax === 'y') { if (player.vel.y * gs < 0) player.onGround = true; player.vel.y = 0; }
+    } else {
+      player.pos[ax] = p[ax];
+      if (ax === 'y') player.onGround = false;
+    }
+  }
+  // word-block effects underfoot
+  personalFlip -= dt; stepCool -= dt;
+  if (player.onGround) {
+    const under = get(Math.floor(player.pos.x), Math.floor(player.pos.y - 0.15), Math.floor(player.pos.z));
+    if (under === 7 && personalFlip < 0) { personalFlip = 1.0; player.onGround = false; } // backwards: brief reversed gravity
+    if (under === 8 && stepCool < 0) {                                                    // loud: note conjures a platform
+      stepCool = 0.8;
+      const bx = Math.floor(player.pos.x), bz = Math.floor(player.pos.z);
+      const note = noteOf(bx, bz);
+      playNote(note);
+      doorHear(note, bx, bz);
+      if (frogCroakCool < 0 && Math.hypot(bx - frog.position.x, bz - frog.position.z) < 7) frogCroak();
+      // fwd is the horizontal look heading — a platform in your own cell helps no one
+      const px = Math.floor(player.pos.x + fwd.x * 2.5), pz = Math.floor(player.pos.z + fwd.z * 2.5),
+            py = Math.floor(player.pos.y);
+      const k = idx(px, py, pz);
+      if (inB(px, py, pz) && !vox[k]) {
+        vox[k] = 9; rebuild();
+        setTimeout(() => { if (vox[k] === 9) { vox[k] = 0; rebuild(); } }, 3000);
+      }
+    }
+  }
+  if (player.pos.y < -10 || player.pos.y > SY + 15) wake(); // fell out, either way
+  camera.position.copy(player.pos).add(new THREE.Vector3(0, H - 0.15, 0));
+}
+let personalFlip = 0, stepCool = 0, lieClock = 0;
+function gravSign() {
+  let g = 1;
+  if (uDream.value > GRAV_GATE) {
+    const cl = v => Math.min(RW - 1, Math.max(0, Math.floor(v / REG)));
+    g = flipArr[cl(player.pos.x) + RW * cl(player.pos.z)] ? -1 : 1;
+  }
+  return personalFlip > 0 ? -g : g;
+}
+
+// ---------- blocks that vanish when unseen (mid-dream) ----------
+let unstable = new Map(), vanishedBlocks = new Map(); // vox index -> block id
+function rollUnstable() {
+  unstable.clear(); vanishedBlocks.clear();
+  for (let i = 0; i < vox.length; i++)
+    if (vox[i] && vox[i] < 4 && Math.random() < 0.07) unstable.set(i, vox[i]); // plain terrain only
+}
+spawnVaults();
+placeFrog();
+placeWordBlocks();
+spawnIsland();
+rollUnstable();
+updateWordsHUD();
+updateShards();
+rebuild(); // include everything spawned after the first build
+function overlapsPlayer(x, y, z) {
+  return Math.abs(player.pos.x - (x + 0.5)) < 0.8 && Math.abs(player.pos.z - (z + 0.5)) < 0.8 &&
+         player.pos.y < y + 1 && player.pos.y + H > y;
+}
+const _bc = new THREE.Vector3(), _fw = new THREE.Vector3();
+let vanishClock = 0;
+function vanishTick(dt, dream) {
+  vanishClock += dt;
+  if (vanishClock < 0.25) return; // ponytail: 4Hz scan of ~700 blocks, cheap enough
+  vanishClock = 0;
+  let changed = false;
+  camera.getWorldDirection(_fw);
+  for (const [k, id] of unstable) {
+    const y = Math.floor(k / (SX * SZ)), r = k % (SX * SZ), z = Math.floor(r / SX), x = r % SX;
+    const seen = _bc.set(x + 0.5, y + 0.5, z + 0.5).sub(camera.position).normalize().dot(_fw);
+    if (vanishedBlocks.has(k)) {
+      if (dream < 0.3 || seen > 0.5) {               // looked back at it, or lucid again
+        if (vox[k] === 0) {
+          if (!overlapsPlayer(x, y, z)) { vox[k] = id; vanishedBlocks.delete(k); changed = true; }
+        } else { vanishedBlocks.delete(k); unstable.delete(k); } // player built there; let it be
+      }
+    } else if (dream > 0.3 && seen < 0.35 && vox[k] === id) {    // behind you: gone
+      vox[k] = 0; vanishedBlocks.set(k, id); changed = true;
+    }
+  }
+  if (changed) rebuild();
+}
+
+// ---------- break / place ----------
+const ray = new THREE.Raycaster(); ray.far = 6;
+let lastBroken = 1;
+addEventListener('mousedown', e => {
+  if (!playing) return;
+  ray.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hit = ray.intersectObject(worldMesh)[0];
+  if (!hit) return;
+  const n = hit.face.normal;
+  if (e.button === 0) {
+    const p = hit.point.clone().addScaledVector(n, -0.5).floor();
+    if (!inB(p.x, p.y, p.z)) return;
+    const k = idx(p.x, p.y, p.z), b = vox[k];
+    if (b === 4) {                                                    // the anchor bed
+      if (shards >= 3) { winGame(); return; }
+      lucidity = Math.min(100, lucidity + 25);
+      if (shards) showMsg('the bed wants all three shards — you hold ' + shards);
+      return;
+    }
+    if (b === 11) {                                                   // a dream shard
+      shards++;
+      vox[k] = 0; rebuild(); updateShards();
+      showMsg(shards >= 3 ? 'three shards — the anchor bed will let you wake' : 'a dream shard — ' + shards + ' of 3');
+      return;
+    }
+    if (b === 14) {                                                   // the dreamfruit
+      lucidity = Math.min(100, lucidity + 45);
+      for (let i = 0; i < 2; i++) { const w = WORDS[(Math.random() * WORDS.length) | 0]; words[w] = (words[w] || 0) + 1; }
+      vox[k] = 0; rebuild(); updateWordsHUD();
+      showMsg('the dreamfruit bursts — sweetness steadies you, and the island thins');
+      return;
+    }
+    if (b === 12) { showMsg('the seal only answers music, in the runes’ order'); return; }
+    if (b >= 20) { showMsg('the rune hums ' + NOTE_NAMES[b - 20] + ' — find a loud block of that colour'); return; }
+    if (b === 5) {                                                    // carved word block
+      if (uDream.value > 0.35) {
+        const w = WORDS[(Math.random() * WORDS.length) | 0];
+        words[w] = (words[w] || 0) + 1; selWord ??= w;
+        stats.learned = (stats.learned || 0) + 1; persist();
+        showMsg('you learned: ' + w.toUpperCase());
+        vox[k] = 0; rebuild(); updateWordsHUD();
+      } else showMsg('the carving is blurred — you are too awake to read it');
+      return;
+    }
+    if (b >= 6 && b <= 8) {                                           // enchanted: word comes back
+      words[ID_WORD[b]] = (words[ID_WORD[b]] || 0) + 1;
+      enchant.delete(k);
+      vox[k] = 0; rebuild(); updateWordsHUD();
+      return;
+    }
+    if (b && b < 4) lastBroken = b;
+    vox[k] = 0;
+    unstable.delete(k); // broken for real, stops phasing
+    rebuild();
+  } else if (e.button === 2) {
+    const p = hit.point.clone().addScaledVector(n, 0.5).floor();
+    if (!inB(p.x, p.y, p.z) || vox[idx(p.x, p.y, p.z)]) return;
+    // don't place inside yourself
+    if (Math.floor(player.pos.x) === p.x && Math.floor(player.pos.z) === p.z &&
+        p.y >= Math.floor(player.pos.y) && p.y <= Math.floor(player.pos.y + H)) return;
+    let id = lastBroken;
+    if (selWord && words[selWord] > 0) {
+      words[selWord]--;
+      let w = selWord;
+      const dream = uDream.value;
+      if (dream > 0.5 && Math.random() < 0.25) { // fused half-dreaming: the dream mishears you
+        const others = WORDS.filter(x => x !== w);
+        w = others[(Math.random() * others.length) | 0];
+        showMsg('the dream misheard you: ' + w.toUpperCase());
+      }
+      id = WORD_ID[w];
+      enchant.set(idx(p.x, p.y, p.z), 1 + dream); // dream-placed words are stronger
+      if (!words[selWord]) selWord = null;
+      updateWordsHUD();
+    }
+    const kk = idx(p.x, p.y, p.z);
+    vox[kk] = id;
+    if (placedLog.length < 200) placedLog.push({ x: p.x, y: p.y, z: p.z, id });
+    // feeding the echo
+    if (id >= 6 && id <= 8 && echo.material.opacity > 0.2 &&
+        echo.position.distanceTo(_bc.set(p.x + 0.5, p.y + 0.5, p.z + 0.5)) < 4.5) {
+      if (ID_WORD[id] === echoWant) {
+        vox[kk] = 0; enchant.delete(kk); placedLog.pop();
+        for (let i = 0; i < 2; i++) { const w = WORDS[(Math.random() * WORDS.length) | 0]; words[w] = (words[w] || 0) + 1; }
+        lucidity = Math.min(100, lucidity + 35);
+        echoAway = 45; echoAnnounced = false;
+        echoWant = WORDS[(Math.random() * WORDS.length) | 0];
+        showMsg('the echo is sated — it pays in words');
+        updateWordsHUD();
+      } else showMsg('the echo turns away — it wanted ' + echoWant.toUpperCase());
+    }
+    rebuild();
+  }
+});
+addEventListener('contextmenu', e => e.preventDefault());
+
+// ---------- lucidity ----------
+let lucidity = 100;
+const fill = document.getElementById('fill');
+const flash = document.getElementById('flash');
+const skyLucid = new THREE.Color(0x0a0a12), skyDream = new THREE.Color(0x2a0a2e), sky = new THREE.Color();
+
+function wake() {
+  // the dream rearranges: ~15% of columns re-roll, your anchor survives
+  const scar = { x: Math.floor(player.pos.x), z: Math.floor(player.pos.z) };
+  for (const [k, id] of vanishedBlocks) if (vox[k] === 0) vox[k] = id;
+  seed += 37.7;
+  for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++)
+    if (Math.random() < 0.15 && !(x === AX && z === AZ) && !inVault(x, z)) genColumn(x, z);
+  stampBuild();
+  stampScar(scar);
+  vox[idx(AX, anchorY, AZ)] = 4;
+  placeWordBlocks();
+  spawnIsland();
+  rollUnstable();
+  rollRegions();
+  echoAway = Math.max(echoAway, 10); echoAnnounced = false; // the rearrange scatters it too
+  placeFrog();
+  drawFruitSky(); // a different fruit hangs over each dream
+  stats.wakes++;
+  const have = WORDS.filter(w => words[w] > 0); // the dream keeps a word as toll
+  if (have.length) {
+    const w = have[(Math.random() * have.length) | 0];
+    words[w]--;
+    setTimeout(() => showMsg('the dream keeps ' + w.toUpperCase() + ' as toll'), 3400);
+    updateWordsHUD();
+  }
+  persist();
+  rebuild();
+  player.pos.set(AX + 0.5, anchorY + 2, AZ + 2.5);
+  player.vel.set(0, 0, 0);
+  lucidity = 100;
+  flash.style.transition = 'none'; flash.style.opacity = 1;
+  requestAnimationFrame(() => { flash.style.transition = 'opacity 1.2s'; flash.style.opacity = 0; });
+}
+
+// ---------- loop ----------
+window.DBG = { player, flipArr, words, enchant, set luc(v) { lucidity = v; }, get luc() { return lucidity; },
+               get vanished() { return vanishedBlocks.size; },
+               setVox(x, y, z, id) { vox[idx(x, y, z)] = id; rebuild(); },
+               getVox(x, y, z) { return get(x, y, z); },
+               findVox(id) { const out = []; for (let i = 0; i < vox.length; i++) if (vox[i] === id)
+                 out.push([i % SX, (i / (SX * SZ)) | 0, ((i % (SX * SZ)) / SX) | 0]); return out; },
+               cycleWord, updateWordsHUD, cam: camera, get playing() { return playing; },
+               echo, placedLog, get want() { return echoWant; }, set want(w) { echoWant = w; },
+               set away(v) { echoAway = v; }, triggerWake() { wake(); },
+               doors, frog, moth, archive, noteOf, frogCroak, mothTick,
+               spawnIsland, islandTick, get hidden() { return dreamHidden.length; },
+               get shards() { return shards; }, set shards(v) { shards = v; updateShards(); },
+               cast() { ray.setFromCamera(new THREE.Vector2(0, 0), camera);
+                        const h = ray.intersectObject(worldMesh)[0];
+                        return h ? { d: +h.distance.toFixed(2), p: h.point.toArray().map(v => +v.toFixed(2)) } : null; }
+             }; // ponytail: console-test handle
+
+const clock = new THREE.Clock();
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  uTime.value += dt;
+  if (playing) {
+    movePlayer(dt);
+    const nearAnchor = player.pos.distanceTo(new THREE.Vector3(AX + 0.5, anchorY + 1, AZ + 0.5)) < 4;
+    lucidity += (nearAnchor ? 9 : -1.6) * dt;
+    for (const [k, pot] of enchant) { // warm blocks are small anchors; dream-placed ones reach further
+      if (vox[k] !== 6) continue;
+      const y = (k / (SX * SZ)) | 0, r = k % (SX * SZ);
+      if (player.pos.distanceTo(_bc.set(r % SX + 0.5, y + 0.5, (r / SX | 0) + 0.5)) < 1 + 2 * pot)
+        lucidity += 6 * dt;
+    }
+    if (lucidity <= 0) wake();
+    lucidity = Math.min(100, lucidity);
+  }
+  const dream = 1 - lucidity / 100;
+  uDream.value = dream;
+  if (playing) {
+    vanishTick(dt, dream); echoTick(dt, dream); frogTick(dt, dream); mothTick(dt, dream);
+    islandTick(dream);
+    lieClock -= dt;
+    if (lieClock < 0) { lieClock = 2.5; if (dream > 0.6) updateWordsHUD(); } // the HUD re-lies
+  }
+  droneTick(playing ? dream : 0);
+  skyDome.position.copy(camera.position);
+  skyDome.rotation.y += dt * (0.004 + dream * 0.05); // the sky wheels faster as you sink
+  skyMat.color.setHSL(0.76, dream * 0.5, 1 - dream * 0.4); // the fruit sours as you sink
+  after.uniforms.damp.value = dream < 0.25 ? 0 : 0.45 + dream * 0.5; // trails fade in mid-dream
+  sky.lerpColors(skyLucid, skyDream, dream);
+  scene.background.copy(sky); scene.fog.color.copy(sky);
+  scene.fog.near = 20 - dream * 12; scene.fog.far = 70 - dream * 30;
+  camera.fov = 75 + dream * 18; camera.updateProjectionMatrix();
+  fill.style.width = Math.max(0, Math.min(100, lucidity + (dream > 0.7 ? Math.random() * 16 - 8 : 0))) + '%';
+  fill.style.background = `hsl(${45 + dream * 250}, 90%, ${68 - dream * 10}%)`;
+  composer.render();
+}
+tick();
+</script>
+</body>
+</html>

@@ -8,6 +8,7 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0a12; }
   #hud { position: fixed; left: 16px; top: 16px; color: #fff; font: 13px/1.4 monospace;
          text-shadow: 0 1px 3px #000; user-select: none; pointer-events: none; }
+  #worldName { margin-bottom: 10px; color: #e6c9ff; letter-spacing: .08em; }
   #bar { width: 160px; height: 6px; background: #ffffff22; margin-top: 4px; }
   #fill { height: 100%; background: #ffe9a8; width: 100%; }
   #words { margin-top: 8px; opacity: .85; }
@@ -29,9 +30,9 @@
 </style>
 </head>
 <body>
-<div id="hud">LUCIDITY<div id="bar"><div id="fill"></div></div><div id="words"></div><div id="shards"></div><div id="tool"></div></div>
+<div id="hud"><div id="worldName"></div>LUCIDITY<div id="bar"><div id="fill"></div></div><div id="words"></div><div id="shards"></div><div id="tool"></div></div>
 <div id="msg"></div>
-<div id="win"><div>YOU WAKE<br>the dream lets you go<br><span id="winStats"></span><br>
+<div id="win"><div><span id="winTitle">YOU WAKE</span><br><span id="winText">the dream lets you go</span><br><span id="winStats"></span><br>
 <button id="again">sleep again</button></div></div>
 <div id="cross"></div>
 <div id="flash"></div>
@@ -39,7 +40,8 @@
 
 three dream shards sleep behind singing doors
 step on loud blocks matching each door's runes, in order, to open it
-carry all three shards to the pink anchor bed to wake for good
+carry all three shards to the pink anchor bed to open the next dream
+three worlds await: Moss Garden · Glass Desert · Moon Marsh
 
 click to enter
 WASD move · arrows or mouse look · space jump · LMB break · RMB place
@@ -60,7 +62,28 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------- dream worlds ----------
+const save = (() => {
+  try { const data = JSON.parse(localStorage.hypnagogia || '{}'); return data && typeof data === 'object' ? data : {}; }
+  catch { return {}; }
+})();
+const WORLDS = [
+  { name: 'Moss Garden', description: 'the frog remembers the way',
+    ground: [0.30, 0.45, 0.43], dirt: [0.07, 0.30, 0.33], stone: [0.65, 0.12, 0.26],
+    horizon: 0x4c3057, zenith: 0x080b20, dream: 0x511a3b, sun: 0xffd7ad, rim: 0xa48aff, gravity: 1 },
+  { name: 'Glass Desert', description: 'crystal spires sing into an apricot sky',
+    ground: [0.09, 0.55, 0.61], dirt: [0.055, 0.40, 0.43], stone: [0.84, 0.22, 0.36],
+    horizon: 0xa65e67, zenith: 0x221c42, dream: 0x642c76, sun: 0xffc48a, rim: 0x80e4e6, gravity: 1 },
+  { name: 'Moon Marsh', description: 'the mushrooms dream of a lighter moon',
+    ground: [0.48, 0.40, 0.30], dirt: [0.61, 0.22, 0.24], stone: [0.72, 0.24, 0.26],
+    horizon: 0x244d65, zenith: 0x050e24, dream: 0x38295c, sun: 0xaad6ff, rim: 0xe89be1, gravity: 0.65 },
+];
+let worldIndex = Number.isInteger(save.worldIndex) && save.worldIndex >= 0 && save.worldIndex < WORLDS.length ? save.worldIndex : 0;
+let worldRevision = 0;
+const world = () => WORLDS[worldIndex];
 
 // ---------- world ----------
 const SX = 40, SY = 24, SZ = 40;
@@ -80,17 +103,18 @@ function noise(x, z) {
 let seed = 0;
 function colHeight(x, z) {
   const n = noise((x + seed) / 9, (z + seed) / 9) * 0.7 + noise((x + seed) / 3.1, (z + seed) / 3.1) * 0.3;
+  if (worldIndex === 1) return 3 + Math.floor(n * 4 + (Math.sin((x + z * 0.45 + seed) * 0.24) + 1) * 1.8);
+  if (worldIndex === 2) return 3 + Math.floor(n * 5 + Math.sin(x * 0.3) * Math.cos(z * 0.3));
   return 2 + Math.floor(n * 9);
 }
 function genColumn(x, z) {
-  const h = colHeight(x, z);
+  const h = Math.abs(x - AX) <= 2 && Math.abs(z - AZ) <= 3 ? anchorY : colHeight(x, z);
   for (let y = 0; y < SY; y++) vox[idx(x, y, z)] = y < h ? (y === h - 1 ? 1 : y > h - 4 ? 2 : 3) : 0;
 }
-for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++) genColumn(x, z);
-
-// anchor bed near centre
+// Keep the bed and the arrival area on a safe, level patch in every world.
 const AX = SX >> 1, AZ = SZ >> 1;
-const anchorY = colHeight(AX, AZ);
+let anchorY = colHeight(AX, AZ);
+for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++) genColumn(x, z);
 vox[idx(AX, anchorY, AZ)] = 4;
 
 // ---------- notes ----------
@@ -102,9 +126,9 @@ function noteColor(n) { return new THREE.Color().setHSL(NOTE_HUES[n], 0.9, 0.62)
 
 // block palettes (lerped by height for the depth palette shift)
 const PAL = {
-  1: y => new THREE.Color().setHSL(0.30 - y * 0.006, 0.45, 0.42 + y * 0.012), // grass
-  2: y => new THREE.Color().setHSL(0.07, 0.30, 0.30 + y * 0.01),              // dirt
-  3: y => new THREE.Color().setHSL(0.65, 0.12, 0.22 + y * 0.008),             // stone
+  1: y => new THREE.Color().setHSL(world().ground[0] - y * 0.003, world().ground[1], world().ground[2] + y * 0.009), // surface
+  2: y => new THREE.Color().setHSL(world().dirt[0], world().dirt[1], world().dirt[2] + y * 0.008),              // dirt
+  3: y => new THREE.Color().setHSL(world().stone[0], world().stone[1], world().stone[2] + y * 0.006),             // stone
   4: () => new THREE.Color().setHSL(0.88, 0.85, 0.62),                        // anchor bed
   5: () => new THREE.Color().setHSL(0.13, 0.25, 0.88),                        // carved word block
   6: () => new THREE.Color().setHSL(0.09, 0.95, 0.60),                        // warm
@@ -115,6 +139,9 @@ const PAL = {
   11: () => new THREE.Color().setHSL(0.70, 0.60, 0.78),                       // dream shard
   12: () => new THREE.Color().setHSL(0.75, 0.70, 0.45),                       // singing seal
   13: () => new THREE.Color().setHSL(0.50, 0.70, 0.85),                       // almost-nothing (half-dream only)
+  15: () => new THREE.Color(0x8be3ed),                                      // desert crystal
+  17: () => new THREE.Color(0xb8c6ba),                                      // mushroom stem
+  16: () => new THREE.Color(0xb994df),                                      // moon mushroom
   14: () => new THREE.Color().setHSL(0.93, 0.90, 0.60),                       // dreamfruit
 };
 
@@ -158,27 +185,46 @@ function updateShards() {
 }
 function winGame() {
   persist();
+  const final = worldIndex === WORLDS.length - 1;
+  document.getElementById('winTitle').textContent = final ? 'YOU WAKE' : 'A DEEPER DREAM';
+  document.getElementById('winText').textContent = final ? 'three dreams remembered — the dream lets you go' : world().name + ' dissolves. ' + WORLDS[worldIndex + 1].name + ' is waiting.';
+  document.getElementById('again').textContent = final ? 'dream again · Moss Garden' : 'enter ' + WORLDS[worldIndex + 1].name;
   document.getElementById('winStats').textContent =
     'wakes: ' + stats.wakes + ' · words learned: ' + (stats.learned || 0) + ' · memories kept: ' + archive.length;
   document.getElementById('win').style.display = 'flex';
   playing = false;
+  if (document.pointerLockElement) controls.unlock();
 }
-document.getElementById('again').onclick = () => { // a new dream; the archive remembers
-  document.getElementById('win').style.display = 'none';
-  shards = 0; updateShards();
-  doors.length = 0;
-  seed += 101.3;
-  for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++)
-    if (!(x === AX && z === AZ)) genColumn(x, z);
+function updateWorldHUD() {
+  document.getElementById('worldName').textContent = 'DREAM ' + (worldIndex + 1) + '/' + WORLDS.length + ' · ' + world().name.toUpperCase();
+}
+function enterWorld(next) {
+  worldIndex = next; worldRevision++;
+  seed = worldIndex * 137.3 + Math.random() * 30;
+  vox.fill(0); anchorY = colHeight(AX, AZ);
+  for (let x = 0; x < SX; x++) for (let z = 0; z < SZ; z++) genColumn(x, z);
   vox[idx(AX, anchorY, AZ)] = 4;
-  enchant.clear(); placedLog.length = 0;
-  spawnVaults(); placeFrog(); placeWordBlocks(); spawnIsland(); rollUnstable(); rollRegions();
-  lucidity = 100;
-  player.pos.set(AX + 0.5, anchorY + 3, AZ + 2.5); player.vel.set(0, 0, 0);
-  drawFruitSky();
-  rebuild();
-  setPlaying(true);
-};
+  shards = 0; doors.length = 0; enchant.clear(); placedLog.length = 0;
+  spawnVaults(); spawnLandmarks(); placeFrog(); placeWordBlocks(); spawnIsland(); rollUnstable(); rollRegions();
+  personalFlip = stepCool = plungeCool = ringCool = swingT = 0;
+  dash.set(0, 0, 0); player.vel.set(0, 0, 0); player.onGround = false;
+  player.pos.set(AX + 0.5, anchorY + 2, AZ + 2.5);
+  for (const key of Object.keys(keys)) keys[key] = false;
+  if (mothCarrying) words[mothCarrying] = (words[mothCarrying] || 0) + 1;
+  mothCarrying = null; mothT = 0; moth.material.opacity = 0;
+  for (const material of mothMaterials) material.opacity = 0; moth.visible = false;
+  moth.position.set(AX - 8, anchorY + 3, AZ - 8);
+  echoAway = 10; echoAnnounced = false; echo.material.opacity = 0;
+  echo.position.set(AX + 10, anchorY + 3, AZ + 10);
+  frogWarnCool = frogCroakCool = 0;
+  lucidity = 100; uDream.value = 0; after.uniforms.damp.value = 0;
+  applyWorldAtmosphere(); drawFruitSky(); rebuild();
+  updateWorldHUD(); updateShards(); updateWordsHUD(); persist();
+  document.getElementById('win').style.display = 'none';
+  setPlaying(true); controls.lock();
+  showMsg(world().name + ' — ' + world().description);
+}
+document.getElementById('again').onclick = () => enterWorld((worldIndex + 1) % WORLDS.length);
 function cycleWord() {
   const have = [...WORDS.filter(w => words[w] > 0), null];
   if (have.length < 2) return;
@@ -189,11 +235,10 @@ function cycleWord() {
 // ---------- the world remembers ----------
 const placedLog = []; // everything you placed since the last wake
 // long-term memory: archive of past builds, kept across wakes AND sessions
-const save = (() => { try { return JSON.parse(localStorage.hypnagogia || '{}'); } catch { return {}; } })();
 const archive = Array.isArray(save.archive) ? save.archive : [];
 const stats = save.stats || { wakes: 0, learned: 0 };
 if (save.words) for (const w of WORDS) words[w] = save.words[w] | 0;
-function persist() { try { localStorage.hypnagogia = JSON.stringify({ archive, stats, words }); } catch {} }
+function persist() { try { localStorage.hypnagogia = JSON.stringify({ archive, stats, words, worldIndex }); } catch {} }
 function surfaceY(x, z) { let y = SY - 1; while (y > 0 && !get(x, y, z)) y--; return y + 1; }
 function stampScar(s) { // a few dark blocks where you hit zero
   for (let i = 0; i < 4; i++) {
@@ -262,40 +307,67 @@ function echoTick(dt, dream) {
 }
 
 // ---------- the frog with hypnotising eyes ----------
-const fcv = document.createElement('canvas'); fcv.width = 64; fcv.height = 64;
-const fc = fcv.getContext('2d');
-fc.fillStyle = '#3f7d2e';
-fc.beginPath(); fc.ellipse(32, 44, 26, 17, 0, 0, Math.PI * 2); fc.fill();     // body
-fc.beginPath(); fc.ellipse(12, 56, 8, 5, 0, 0, Math.PI * 2);                  // legs
-fc.ellipse(52, 56, 8, 5, 0, 0, Math.PI * 2); fc.fill();
-for (const ex of [19, 45]) {                                                  // bulging eyes
-  fc.fillStyle = '#3f7d2e'; fc.beginPath(); fc.arc(ex, 24, 13, 0, Math.PI * 2); fc.fill();
-  fc.fillStyle = '#f3ecd8'; fc.beginPath(); fc.arc(ex, 22, 10, 0, Math.PI * 2); fc.fill();
-  fc.strokeStyle = '#c23030'; fc.lineWidth = 1.8;                             // the spiral
-  fc.beginPath();
-  for (let a = 0; a < 14; a += 0.3) { const r = a * 0.62; fc.lineTo(ex + Math.cos(a) * r, 22 + Math.sin(a) * r); }
-  fc.stroke();
-  fc.fillStyle = '#111'; fc.beginPath(); fc.arc(ex, 22, 1.6, 0, Math.PI * 2); fc.fill();
+function creatureMesh(parent, geometry, material, position, scale = [1, 1, 1]) {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set(...position); mesh.scale.set(...scale); parent.add(mesh); return mesh;
 }
-fc.strokeStyle = '#2a5520'; fc.lineWidth = 2;
-fc.beginPath(); fc.moveTo(18, 44); fc.quadraticCurveTo(32, 50, 46, 44); fc.stroke(); // mouth
-const frog = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(fcv), transparent: true }));
-frog.scale.set(1.9, 1.9, 1);
+const frog = new THREE.Group();
+const frogSkin = new THREE.MeshLambertMaterial({ color: 0x6d9974, flatShading: true });
+const frogBelly = new THREE.MeshLambertMaterial({ color: 0xd7d09b, flatShading: true });
+const frogSpot = new THREE.MeshLambertMaterial({ color: 0x365d62 });
+const round = new THREE.SphereGeometry(1, 12, 8);
+creatureMesh(frog, round, frogSkin, [0, -0.13, 0], [0.72, 0.48, 0.53]);
+creatureMesh(frog, round, frogBelly, [0, -0.17, 0.39], [0.5, 0.32, 0.16]);
+creatureMesh(frog, round, frogSkin, [0, 0.2, 0.12], [0.66, 0.29, 0.47]);
+const frogThroat = creatureMesh(frog, round, frogBelly, [0, 0, 0.51], [0.28, 0.15, 0.12]);
+const spiralCv = document.createElement('canvas'); spiralCv.width = spiralCv.height = 128;
+const spiralCtx = spiralCv.getContext('2d');
+spiralCtx.fillStyle = '#faeac2'; spiralCtx.fillRect(0, 0, 128, 128);
+spiralCtx.strokeStyle = '#9b467d'; spiralCtx.lineWidth = 6;
+spiralCtx.beginPath();
+for (let a = 0; a < 22; a += 0.08) {
+  const r = a * 2.8; const x = 64 + Math.cos(a) * r, y = 64 + Math.sin(a) * r;
+  if (a === 0) spiralCtx.moveTo(x, y); else spiralCtx.lineTo(x, y);
+}
+spiralCtx.stroke();
+spiralCtx.fillStyle = '#32273e'; spiralCtx.beginPath(); spiralCtx.arc(64, 64, 7, 0, Math.PI * 2); spiralCtx.fill();
+const irisTexture = new THREE.CanvasTexture(spiralCv); irisTexture.colorSpace = THREE.SRGBColorSpace;
+const irisMat = new THREE.MeshBasicMaterial({ map: irisTexture });
+const frogIrises = [];
+for (const side of [-1, 1]) {
+  creatureMesh(frog, round, frogSkin, [side * 0.43, -0.37, -0.1], [0.4, 0.27, 0.4]);
+  creatureMesh(frog, round, frogSkin, [side * 0.61, -0.59, 0.22], [0.3, 0.1, 0.28]);
+  for (let toe = 0; toe < 3; toe++)
+    creatureMesh(frog, round, frogBelly, [side * (0.45 + toe * 0.13), -0.62, 0.44], [0.065, 0.045, 0.17]);
+  creatureMesh(frog, round, frogSkin, [side * 0.41, 0.48, 0.17], [0.28, 0.3, 0.25]);
+  creatureMesh(frog, round, frogBelly, [side * 0.41, 0.5, 0.34], [0.22, 0.23, 0.12]);
+  const iris = creatureMesh(frog, new THREE.CircleGeometry(0.184, 32), irisMat, [side * 0.41, 0.51, 0.455]);
+  frogIrises.push(iris);
+  for (let i = 0; i < 4; i++)
+    creatureMesh(frog, round, frogSpot, [side * (0.25 + i * 0.105), 0.28 - i * 0.08, 0.48 - i * 0.01], [0.035, 0.028, 0.018]);
+}
+const smile = new THREE.CatmullRomCurve3([
+  new THREE.Vector3(-0.36, 0.17, 0.51), new THREE.Vector3(0, 0.1, 0.58), new THREE.Vector3(0.36, 0.17, 0.51)
+]);
+creatureMesh(frog, new THREE.TubeGeometry(smile, 16, 0.013, 5, false), frogSpot, [0, 0, 0]);
 let frogWarnCool = 0, frogCroakCool = 0;
 function placeFrog() {
   for (let i = 0; i < 40; i++) {
     const x = 2 + ((Math.random() * (SX - 4)) | 0), z = 2 + ((Math.random() * (SZ - 4)) | 0);
     if (Math.hypot(x - AX, z - AZ) < 12 || inVault(x, z)) continue;
-    frog.position.set(x + 0.5, surfaceY(x, z) + 0.8, z + 0.5);
+    frog.position.set(x + 0.5, surfaceY(x, z) + 0.68, z + 0.5);
     return;
   }
 }
 function frogTick(dt, dream) {
   frogWarnCool -= dt; frogCroakCool -= dt;
-  frog.scale.y = 1.9 + Math.sin(uTime.value * 2.1) * 0.08; // it breathes
+  frog.scale.y = 1 + Math.sin(uTime.value * 2.1) * 0.035;
+  frog.rotation.y = Math.atan2(camera.position.x - frog.position.x, camera.position.z - frog.position.z);
+  frogIrises.forEach((iris, i) => iris.rotation.z = uTime.value * (0.18 + dream * 0.8) * (i ? -1 : 1));
+  frogThroat.scale.y = 0.15 + (frogCroakCool > 5.2 ? Math.abs(Math.sin(uTime.value * 18)) * 0.16 : 0);
   const sy = surfaceY(Math.max(0, Math.min(SX - 1, Math.floor(frog.position.x))),
                       Math.max(0, Math.min(SZ - 1, Math.floor(frog.position.z))));
-  frog.position.y += (sy + 0.8 - frog.position.y) * Math.min(1, dt * 3);
+  frog.position.y += (sy + 0.68 - frog.position.y) * Math.min(1, dt * 3);
   if (dream < 0.1) return;                                   // too awake to be caught
   const d = _bc.copy(frog.position).sub(camera.position);
   const dist = d.length();
@@ -321,20 +393,54 @@ function frogCroak() {
 }
 
 // ---------- the moth that steals words ----------
-const mcv = document.createElement('canvas'); mcv.width = 48; mcv.height = 48;
-const mc = mcv.getContext('2d');
-mc.fillStyle = '#d8cfae';
-mc.beginPath(); mc.moveTo(24, 24); mc.lineTo(2, 8); mc.lineTo(10, 30); mc.closePath(); mc.fill();   // wings
-mc.beginPath(); mc.moveTo(24, 24); mc.lineTo(46, 8); mc.lineTo(38, 30); mc.closePath(); mc.fill();
-mc.fillStyle = '#6b5d4f'; mc.fillRect(22, 14, 4, 22);                                               // body
-const moth = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(mcv), transparent: true, opacity: 0 }));
-moth.scale.set(0.8, 0.8, 1);
+const moth = new THREE.Group();
+const mothBody = new THREE.MeshLambertMaterial({ color: 0xe3cfa6, transparent: true, opacity: 0, depthWrite: false });
+const mothWing = new THREE.MeshLambertMaterial({ color: 0x9a7aaf, side: THREE.DoubleSide, transparent: true, opacity: 0, depthWrite: false });
+const mothGold = new THREE.MeshBasicMaterial({ color: 0xeac98c, side: THREE.DoubleSide, transparent: true, opacity: 0, depthWrite: false });
+const mothInk = new THREE.MeshBasicMaterial({ color: 0x352e56, side: THREE.DoubleSide, transparent: true, opacity: 0, depthWrite: false });
+const mothVein = new THREE.LineBasicMaterial({ color: 0xeac98c, transparent: true, opacity: 0, depthWrite: false });
+const mothWings = [];
+for (const side of [-1, 1]) {
+  const wing = new THREE.Group(); wing.scale.x = side; moth.add(wing); mothWings.push(wing);
+  const shape = new THREE.Shape();
+  shape.moveTo(0.025, 0.12); shape.bezierCurveTo(0.25, 0.46, 0.65, 0.65, 0.78, 0.44);
+  shape.bezierCurveTo(0.84, 0.23, 0.66, -0.02, 0.45, -0.07);
+  shape.bezierCurveTo(0.68, -0.28, 0.42, -0.53, 0.18, -0.34);
+  shape.quadraticCurveTo(0.06, -0.24, 0.025, 0.12);
+  creatureMesh(wing, new THREE.ShapeGeometry(shape, 20), mothWing, [0, 0, 0]);
+  const border = new THREE.Line(new THREE.BufferGeometry().setFromPoints(shape.getPoints(48).map(p => new THREE.Vector3(p.x, p.y, 0.008))), mothVein);
+  wing.add(border);
+  for (const [x, y, radius] of [[0.48, 0.28, 0.12], [0.32, -0.22, 0.075]]) {
+    creatureMesh(wing, new THREE.CircleGeometry(radius, 24), mothGold, [x, y, 0.012]);
+    creatureMesh(wing, new THREE.CircleGeometry(radius * 0.68, 24), mothInk, [x, y, 0.016]);
+    creatureMesh(wing, new THREE.CircleGeometry(radius * 0.29, 20), mothGold, [x, y, 0.02]);
+  }
+  for (let i = 0; i < 4; i++) {
+    const points = [[0.045, 0, 0.025], [0.26, 0.05 + i * 0.08, 0.025], [0.6 + i * 0.035, 0.1 + i * 0.095, 0.025]];
+    wing.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(...p))), mothVein));
+  }
+  const antenna = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(side * 0.03, 0.2, 0), new THREE.Vector3(side * 0.1, 0.38, 0), new THREE.Vector3(side * 0.2, 0.42, 0.02)
+  ]);
+  creatureMesh(moth, new THREE.TubeGeometry(antenna, 10, 0.008, 4, false), mothBody, [0, 0, 0]);
+}
+creatureMesh(moth, round, mothBody, [0, -0.08, 0.04], [0.065, 0.24, 0.07]);
+creatureMesh(moth, round, mothBody, [0, 0.13, 0.04], [0.095, 0.12, 0.095]);
+creatureMesh(moth, round, mothInk, [-0.046, 0.2, 0.11], [0.022, 0.025, 0.02]);
+creatureMesh(moth, round, mothInk, [0.046, 0.2, 0.11], [0.022, 0.025, 0.02]);
+moth.material = mothBody; // shared opacity also drives the wings and markings
+const mothMaterials = [mothBody, mothWing, mothGold, mothInk, mothVein];
+moth.scale.setScalar(0.85);
 moth.position.set(AX - 8, 10, AZ - 8);
 let mothCarrying = null, mothT = 0;
 const mothTarget = new THREE.Vector3();
 function mothTick(dt, dream) {
   const active = dream > 0.2;
   moth.material.opacity += ((active ? 0.45 + dream * 0.45 : 0) - moth.material.opacity) * Math.min(1, dt * 2);
+  for (const material of mothMaterials) material.opacity = moth.material.opacity;
+  moth.visible = moth.material.opacity > 0.01;
+  moth.rotation.y = Math.atan2(camera.position.x - moth.position.x, camera.position.z - moth.position.z);
+  mothWings.forEach((wing, i) => wing.rotation.y = Math.sin(uTime.value * 18) * 0.65 * (i ? 1 : -1));
   if (!active) return;
   mothT -= dt;
   if (mothT < 0) {
@@ -398,6 +504,7 @@ function playNote(note, freq) {
 let shards = 0;
 const doors = [];
 function buildVault(cx, cz) {
+  if (cx > AX && cz > AZ) return false; // leave the dream-island stairway clear
   const y0 = surfaceY(cx, cz);
   if (y0 > SY - 5) return false;
   const melody = [0, 0, 0].map(() => (Math.random() * 5) | 0);
@@ -424,6 +531,34 @@ function spawnVaults() {
     if (Math.hypot(cx - AX, cz - AZ) < 8) continue;
     if (doors.some(d => Math.hypot(cx - d.cx, cz - d.cz) < 8)) continue;
     buildVault(cx, cz);
+  }
+  for (let cx = 4; cx < SX - 3 && doors.length < 3; cx += 8)
+    for (let cz = 4; cz < SZ - 3 && doors.length < 3; cz += 8)
+      if (Math.hypot(cx - AX, cz - AZ) >= 8 && doors.every(d => Math.hypot(cx - d.cx, cz - d.cz) >= 8)) buildVault(cx, cz);
+}
+function spawnLandmarks() {
+  if (worldIndex === 0) return;
+  const used = [];
+  for (let i = 0; i < 100 && used.length < 12; i++) {
+    const x = 3 + Math.floor(hash(i + seed, 19) * (SX - 6));
+    const z = 3 + Math.floor(hash(i + seed, 47) * (SZ - 6));
+    if (Math.hypot(x - AX, z - AZ) < 7 || (x >= AX + 2 && z >= AZ + 2) ||
+        doors.some(d => Math.abs(x - d.cx) < 6 && Math.abs(z - d.cz) < 6) ||
+        used.some(p => Math.hypot(x - p.x, z - p.z) < 5)) continue;
+    const y = surfaceY(x, z), height = 3 + i % 3;
+    if (y + height + 1 >= SY) continue;
+    used.push({ x, z });
+    for (let h = 0; h < height; h++) vox[idx(x, y + h, z)] = worldIndex === 1 ? 15 : 17;
+    if (worldIndex === 1) {
+      vox[idx(x + 1, y, z)] = 15; vox[idx(x + 1, y + 1, z)] = 15;
+      vox[idx(x, y, z + 1)] = 15;
+    } else {
+      for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
+        if (dx * dx + dz * dz > 5) continue;
+        vox[idx(x + dx, y + height, z + dz)] = 16;
+        if (Math.abs(dx) + Math.abs(dz) < 2) vox[idx(x + dx, y + height + 1, z + dz)] = 16;
+      }
+    }
   }
 }
 function inVault(x, z) {
@@ -493,7 +628,7 @@ const FACES = [
 ];
 let worldMesh;
 function rebuild() {
-  const pos = [], nor = [], col = [], uv = [], ind = [];
+  const pos = [], nor = [], col = [], uv = [], glow = [], ind = [];
   let n = 0;
   for (let y = 0; y < SY; y++) for (let z = 0; z < SZ; z++) for (let x = 0; x < SX; x++) {
     const b = vox[idx(x, y, z)];
@@ -501,10 +636,25 @@ function rebuild() {
     const c = b >= 20 ? noteColor(b - 20) : PAL[b](y, x, z); // 20+ are door runes
     for (const f of FACES) {
       if (get(x + f.d[0], y + f.d[1], z + f.d[2])) continue;
+      const axes = [0, 1, 2].filter(a => f.d[a] === 0);
+      const luminous = [4, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16].includes(b) || b >= 20;
+      const variation = 0.94 + hash(x + y * 31, z) * 0.12;
       for (const v of f.c) {
+        // Corner occlusion gives crevices depth without another render pass.
+        const side = axes.map(a => {
+          const offset = [...f.d]; offset[a] += v[a] ? 1 : -1;
+          return offset;
+        });
+        const occupied = offset => get(x + offset[0], y + offset[1], z + offset[2]) ? 1 : 0;
+        const a = occupied(side[0]), bSide = occupied(side[1]);
+        const diagonal = f.d.map((d, i) => side[0][i] + side[1][i] - d);
+        const occlusion = a && bSide ? 3 : a + bSide + occupied(diagonal);
+        const shade = (1 - occlusion * 0.17) * variation;
         pos.push(x + v[0], y + v[1], z + v[2]);
         nor.push(...f.d);
-        col.push(c.r, c.g, c.b);
+        col.push(c.r * shade, c.g * shade, c.b * shade);
+        const emission = luminous ? (b === 11 ? 1.8 : 0.65) : 0;
+        glow.push(c.r * emission, c.g * emission, c.b * emission);
       }
       uv.push(0, 0, 1, 0, 1, 1, 0, 1);
       ind.push(n, n + 1, n + 2, n, n + 2, n + 3);
@@ -515,6 +665,7 @@ function rebuild() {
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('glow', new THREE.Float32BufferAttribute(glow, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.setIndex(ind);
   if (worldMesh) { worldMesh.geometry.dispose(); worldMesh.geometry = g; }
@@ -525,9 +676,12 @@ function rebuild() {
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x0a0a12, 20, 70);
 scene.background = new THREE.Color(0x0a0a12);
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sun = new THREE.DirectionalLight(0xfff2d8, 1.4);
-sun.position.set(0.6, 1, 0.4);
+scene.add(new THREE.HemisphereLight(0xbfcaff, 0x39233f, 1.15));
+const sun = new THREE.DirectionalLight(0xffd7ad, 1.8);
+sun.position.set(-0.6, 1, 0.4);
+const rim = new THREE.DirectionalLight(0xa48aff, 0.65);
+rim.position.set(1, 0.3, -1);
+scene.add(rim);
 scene.add(sun);
 scene.add(echo); scene.add(frog); scene.add(moth);
 
@@ -602,7 +756,37 @@ function drawFruitSky() {
   skyTex.needsUpdate = true;
 }
 drawFruitSky();
-const skyMat = new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, fog: false, depthWrite: false });
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false,
+  uniforms: { fruit: { value: skyTex }, dream: { value: 0 }, time: { value: 0 },
+    horizon: { value: new THREE.Color(world().horizon) }, zenith: { value: new THREE.Color(world().zenith) } },
+  vertexShader: `varying vec2 vUv;
+    varying vec3 vDirection;
+    void main() {
+      vUv = uv; vDirection = normalize(position);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: `uniform sampler2D fruit;
+    uniform float dream, time;
+    uniform vec3 horizon, zenith;
+    varying vec2 vUv;
+    varying vec3 vDirection;
+    void main() {
+      float height = normalize(vDirection).y;
+      vec3 dusk = mix(horizon, horizon * vec3(1.05, 0.6, 0.9), dream);
+      vec3 color = mix(dusk, zenith, smoothstep(-0.15, 0.85, height));
+      vec2 cell = floor(vUv * vec2(600.0, 300.0));
+      float star = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+      float pin = pow(max(0.0, 1.0 - length(fract(vUv * vec2(600.0, 300.0)) - 0.5) * 2.0), 5.0);
+      color += step(0.994, star) * pin * smoothstep(0.0, 0.4, height)
+        * (0.65 + 0.25 * sin(time * 0.7 + star * 120.0));
+      vec3 flesh = texture2D(fruit, vUv).rgb;
+      color = mix(color, flesh * vec3(0.7, 0.48, 0.72), smoothstep(0.15, 0.95, dream) * 0.8);
+      gl_FragColor = vec4(color, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`
+});
 const skyDome = new THREE.Mesh(new THREE.SphereGeometry(140, 24, 16), skyMat);
 scene.add(skyDome);
 
@@ -634,9 +818,13 @@ const mat = new THREE.MeshLambertMaterial({ vertexColors: true, map: grainTex })
 mat.onBeforeCompile = s => {
   s.uniforms.uTime = uTime; s.uniforms.uDream = uDream;
   s.uniforms.uFlip = { value: flipArr };
+  s.vertexShader = 'attribute vec3 glow; varying vec3 vGlow;\n' + s.vertexShader;
+  s.fragmentShader = 'varying vec3 vGlow;\n' + s.fragmentShader;
+  s.fragmentShader = s.fragmentShader.replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance += vGlow * (0.85 + 0.15 * sin(uTime * 1.6 + vWorldPos.y));');
   s.vertexShader = 'uniform float uTime, uDream;\nvarying vec3 vWorldPos;\n' + s.vertexShader.replace(
     '#include <begin_vertex>',
     `#include <begin_vertex>
+     vGlow = glow;
      vWorldPos = position;
      transformed += normal * sin(uTime * 1.7 + position.x * 0.9 + position.y * 1.3 + position.z * 0.7)
                   * uDream * uDream * 0.22;`);
@@ -664,41 +852,99 @@ const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 20
 scene.add(camera); // so camera children render
 const hand = new THREE.Group();
 {
-  const skin = new THREE.MeshLambertMaterial({ color: 0xd9b8a6, depthTest: false });
-  const heldM = new THREE.MeshLambertMaterial({ depthTest: false });
-  const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.45), skin);
-  forearm.position.set(0.04, -0.09, 0.24);
-  forearm.rotation.x = 0.25;
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.11, 0.17), skin);
-  const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.045, 0.1), skin);
-  thumb.position.set(-0.09, 0.02, -0.03);
-  const fingers = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.045, 0.09), skin);
-  fingers.position.set(0, 0.05, -0.1);
-  fingers.rotation.x = 0.5; // curled over the block
-  const held = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.17), heldM);
-  held.position.set(0, 0.1, -0.12);
-  // plunger: wooden stick, red rubber cup
+  const material = color => new THREE.MeshLambertMaterial({ color, depthTest: false, depthWrite: false });
+  const skin = material(0xd9a78e), knuckle = material(0xc58e78), nail = material(0xefc8b6);
+  const sleeve = material(0x35304e), cuff = material(0x817293), seam = material(0xbfa5be);
+  const wood = material(0xa66b40), woodDark = material(0x67402c);
+  const rubber = material(0xa63751), rubberEdge = material(0xdc6370);
+  const brass = material(0xd9ad64), brassDark = material(0x86603c);
+  const ivory = material(0xf6e6c5), ink = material(0x3c3048);
+  const heldM = material(0xffffff);
+  function box(parent, size, position, mat) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), mat);
+    mesh.position.set(...position); parent.add(mesh); return mesh;
+  }
+  function cylinder(parent, top, bottom, height, position, mat, segments = 12) {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(top, bottom, height, segments), mat);
+    mesh.position.set(...position); parent.add(mesh); return mesh;
+  }
+  // A loose pajama sleeve, stitched cuff and individually curled fingers.
+  const forearm = box(hand, [0.16, 0.15, 0.37], [0.025, -0.075, 0.26], sleeve);
+  forearm.rotation.x = 0.18;
+  box(hand, [0.173, 0.16, 0.065], [0.025, -0.043, 0.105], cuff);
+  box(hand, [0.177, 0.013, 0.014], [0.025, 0.025, 0.08], seam);
+  box(hand, [0.115, 0.105, 0.09], [0.013, -0.025, 0.04], skin);
+  box(hand, [0.145, 0.115, 0.14], [0, 0, -0.04], skin);
+  for (let i = 0; i < 4; i++) {
+    const x = -0.055 + i * 0.036;
+    const finger = box(hand, [0.031, 0.048, 0.09], [x, 0.045, -0.105], skin);
+    finger.rotation.x = -0.35;
+    box(hand, [0.031, 0.048, 0.035], [x, 0.017, -0.15], knuckle);
+    box(hand, [0.021, 0.023, 0.005], [x, 0.018, -0.17], nail);
+  }
+  const thumb = box(hand, [0.052, 0.055, 0.095], [-0.086, 0.025, -0.065], skin);
+  thumb.rotation.z = -0.5;
+  const held = box(hand, [0.18, 0.18, 0.18], [0, 0.135, -0.12], heldM);
+  held.rotation.y = 0.18;
+
+  // Turned wood handle and a hollow, flared rubber suction cup.
   const plunger = new THREE.Group();
-  const stick = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.045, 0.4), new THREE.MeshLambertMaterial({ color: 0xa5703f, depthTest: false }));
-  stick.position.set(0, 0.06, -0.2);
-  const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.12, 0.1, 10), new THREE.MeshLambertMaterial({ color: 0xc23030, depthTest: false }));
-  cup.rotation.x = -Math.PI / 2;
-  cup.position.set(0, 0.06, -0.44);
-  plunger.add(stick, cup);
-  // alarm clock: yellow body, two bells
+  plunger.position.set(0, 0.025, -0.12);
+  plunger.rotation.set(-0.24, 0, -0.14);
+  cylinder(plunger, 0.023, 0.028, 0.44, [0, 0.17, 0], wood);
+  cylinder(plunger, 0.031, 0.031, 0.12, [0, 0.005, 0], woodDark);
+  for (let i = 0; i < 4; i++) cylinder(plunger, 0.033, 0.033, 0.008, [0, -0.04 + i * 0.029, 0], brassDark);
+  cylinder(plunger, 0.035, 0.027, 0.04, [0, 0.37, 0], brass);
+  const profile = [[0.027,0], [0.05,0.025], [0.072,0.075], [0.13,0.12],
+    [0.145,0.126], [0.145,0.145], [0.125,0.145], [0.113,0.12],
+    [0.058,0.074], [0.035,0.03], [0,0.03]];
+  const cup = new THREE.Mesh(new THREE.LatheGeometry(profile.map(p => new THREE.Vector2(...p)), 16), rubber);
+  cup.position.y = 0.385; plunger.add(cup);
+  const lip = new THREE.Mesh(new THREE.TorusGeometry(0.135, 0.012, 6, 16), rubberEdge);
+  lip.rotation.x = Math.PI / 2; lip.position.y = 0.522; plunger.add(lip);
+
+  // Brass bedside clock, with an inset dial, raised bezel and twin bells.
   const clock = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.09), new THREE.MeshLambertMaterial({ color: 0xf2c438, depthTest: false }));
-  body.position.set(0, 0.12, -0.1);
-  const bellM = new THREE.MeshLambertMaterial({ color: 0xd9d9e8, depthTest: false });
-  const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.06), bellM); b1.position.set(-0.055, 0.235, -0.1);
-  const b2 = b1.clone(); b2.position.x = 0.055;
-  clock.add(body, b1, b2);
-  hand.add(forearm, palm, thumb, fingers, held, plunger, clock);
+  clock.position.set(0, 0.205, -0.13);
+  clock.rotation.set(-0.08, -0.16, -0.08);
+  const caseBody = cylinder(clock, 0.167, 0.167, 0.105, [0, 0, 0], brass, 24);
+  caseBody.rotation.x = Math.PI / 2;
+  const face = new THREE.Mesh(new THREE.CircleGeometry(0.142, 32), ivory);
+  face.position.z = 0.055; clock.add(face);
+  const bezel = new THREE.Mesh(new THREE.TorusGeometry(0.148, 0.016, 6, 24), brassDark);
+  bezel.position.z = 0.057; clock.add(bezel);
+  for (let i = 0; i < 12; i++) {
+    const angle = i * Math.PI / 6;
+    const mark = box(clock, [i % 3 ? 0.006 : 0.012, i % 3 ? 0.015 : 0.026, 0.004],
+      [Math.sin(angle) * 0.119, Math.cos(angle) * 0.119, 0.06], ink);
+    mark.rotation.z = -angle;
+  }
+  const hourHand = new THREE.Group(), minuteHand = new THREE.Group();
+  hourHand.position.z = 0.065; minuteHand.position.z = 0.07;
+  box(hourHand, [0.014, 0.07, 0.006], [0, 0.025, 0], ink);
+  box(minuteHand, [0.008, 0.105, 0.005], [0, 0.041, 0], ink);
+  clock.add(hourHand, minuteHand);
+  const pin = new THREE.Mesh(new THREE.SphereGeometry(0.014, 8, 6), rubberEdge);
+  pin.position.z = 0.077; clock.add(pin);
+  const bells = new THREE.Group(); clock.add(bells);
+  const bellMetal = brass.clone(); bellMetal.side = THREE.DoubleSide;
+  for (const side of [-1, 1]) {
+    const stem = cylinder(clock, 0.009, 0.009, 0.055, [side * 0.103, 0.145, 0], brassDark);
+    stem.rotation.z = -side * 0.45;
+    const bell = new THREE.Mesh(new THREE.SphereGeometry(0.067, 12, 6, 0, Math.PI * 2, 0, Math.PI / 2), bellMetal);
+    bell.position.set(side * 0.115, 0.18, 0); bell.rotation.z = -side * 0.3; bells.add(bell);
+    const foot = box(clock, [0.033, 0.065, 0.05], [side * 0.095, -0.157, 0], brassDark);
+    foot.rotation.z = side * 0.3;
+  }
+  box(clock, [0.012, 0.06, 0.018], [0, 0.182, 0], brassDark);
+  box(bells, [0.048, 0.014, 0.022], [0, 0.21, 0], brass);
+  hand.add(held, plunger, clock);
+  plunger.visible = clock.visible = false;
   hand.traverse(o => o.renderOrder = 999); // drawn over the world, never clips into walls
   hand.position.set(0.38, -0.34, -0.65);
   hand.rotation.set(-0.15, 0.22, 0.08);
   camera.add(hand);
-  Object.assign(hand.userData, { heldM, held, plunger, clock });
+  Object.assign(hand.userData, { heldM, held, plunger, clock, hourHand, minuteHand, bells });
 }
 const TOOLS = ['hand', 'plunger', 'clock'];
 let tool = 'hand', plungeCool = 0, ringCool = 0;
@@ -721,17 +967,24 @@ function handTick(dt) {
   hand.userData.held.visible = tool === 'hand';
   hand.userData.plunger.visible = tool === 'plunger';
   hand.userData.clock.visible = tool === 'clock';
+  hand.userData.hourHand.rotation.z = -0.8 - uTime.value * (0.015 + uDream.value * 0.15);
+  hand.userData.minuteHand.rotation.z = -2.3 - uTime.value * (0.18 + uDream.value * 1.8);
+  hand.userData.bells.rotation.z = ringCool > 3.4 ? Math.sin(uTime.value * 70) * 0.055 : 0;
   plungeCool -= dt; ringCool -= dt;
 }
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
 document.body.appendChild(renderer.domElement);
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const after = new AfterimagePass(0);
 composer.addPass(after);
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.28, 0.55, 1.05);
+composer.addPass(bloom);
 composer.addPass(new OutputPass());
 
 addEventListener('resize', () => {
@@ -749,7 +1002,7 @@ function setPlaying(on) { playing = on; hint.style.display = on ? 'none' : 'flex
 hint.onclick = () => { AC ??= new AudioContext(); controls.lock(); setPlaying(true); }; // ponytail: optimistic; pointer lock denied (file://, embedded pane) still plays via arrow-key look
 controls.addEventListener('unlock', () => setPlaying(false));
 addEventListener('keydown', e => {
-  if (e.code === 'Escape') setPlaying(false);
+  if (e.code === 'Escape') { setPlaying(false); if (document.pointerLockElement) controls.unlock(); }
   if ((e.code === 'KeyQ' || e.code === 'Tab') && playing) { e.preventDefault(); cycleWord(); }
   if (e.code === 'KeyE' && playing) { tool = TOOLS[(TOOLS.indexOf(tool) + 1) % TOOLS.length]; updateToolHUD(); }
 });
@@ -784,7 +1037,7 @@ function movePlayer(dt) {
   player.vel.x = wish.x + dash.x; player.vel.z = wish.z + dash.z;
   dash.multiplyScalar(Math.max(0, 1 - 2.5 * dt)); // plunger pull fades
   const gs = gravSign();
-  player.vel.y -= 22 * dt * gs;
+  player.vel.y -= 22 * world().gravity * dt * gs;
   if (keys.Space && player.onGround) { player.vel.y = 8 * gs; player.onGround = false; }
   // per-axis resolve
   for (const ax of ['x', 'y', 'z']) {
@@ -815,7 +1068,8 @@ function movePlayer(dt) {
       const k = idx(px, py, pz);
       if (inB(px, py, pz) && !vox[k]) {
         vox[k] = 9; rebuild();
-        setTimeout(() => { if (vox[k] === 9) { vox[k] = 0; rebuild(); } }, 3000);
+        const revision = worldRevision;
+        setTimeout(() => { if (revision === worldRevision && vox[k] === 9) { vox[k] = 0; rebuild(); } }, 3000);
       }
     }
   }
@@ -840,6 +1094,7 @@ function rollUnstable() {
     if (vox[i] && vox[i] < 4 && Math.random() < 0.07) unstable.set(i, vox[i]); // plain terrain only
 }
 spawnVaults();
+spawnLandmarks();
 placeFrog();
 placeWordBlocks();
 spawnIsland();
@@ -847,6 +1102,7 @@ rollUnstable();
 updateWordsHUD();
 updateShards();
 updateToolHUD();
+updateWorldHUD();
 rebuild(); // include everything spawned after the first build
 function overlapsPlayer(x, y, z) {
   return Math.abs(player.pos.x - (x + 0.5)) < 0.8 && Math.abs(player.pos.z - (z + 0.5)) < 0.8 &&
@@ -1002,9 +1258,17 @@ addEventListener('contextmenu', e => e.preventDefault());
 let lucidity = 100;
 const fill = document.getElementById('fill');
 const flash = document.getElementById('flash');
-const skyLucid = new THREE.Color(0x0a0a12), skyDream = new THREE.Color(0x2a0a2e), sky = new THREE.Color();
+const skyLucid = new THREE.Color(world().horizon), skyDream = new THREE.Color(world().dream), sky = new THREE.Color();
+function applyWorldAtmosphere() {
+  skyLucid.set(world().horizon); skyDream.set(world().dream);
+  skyMat.uniforms.horizon.value.set(world().horizon); skyMat.uniforms.zenith.value.set(world().zenith);
+  sun.color.set(world().sun); rim.color.set(world().rim);
+}
+applyWorldAtmosphere();
 
 function wake() {
+  worldRevision++;
+  for (let i = 0; i < vox.length; i++) if (vox[i] === 9) vox[i] = 0;
   // the dream rearranges: ~15% of columns re-roll, your anchor survives
   const scar = { x: Math.floor(player.pos.x), z: Math.floor(player.pos.z) };
   for (const [k, id] of vanishedBlocks) if (vox[k] === 0) vox[k] = id;
@@ -1039,7 +1303,7 @@ function wake() {
 }
 
 // ---------- loop ----------
-window.DBG = { player, flipArr, words, enchant, set luc(v) { lucidity = v; }, get luc() { return lucidity; },
+window.DBG = { player, camera, getBlock: get, flipArr, words, enchant, set luc(v) { lucidity = v; }, get luc() { return lucidity; },
                get vanished() { return vanishedBlocks.size; },
                setVox(x, y, z, id) { vox[idx(x, y, z)] = id; rebuild(); },
                getVox(x, y, z) { return get(x, y, z); },
@@ -1050,6 +1314,9 @@ window.DBG = { player, flipArr, words, enchant, set luc(v) { lucidity = v; }, ge
                echo, placedLog, get want() { return echoWant; }, set want(w) { echoWant = w; },
                set away(v) { echoAway = v; }, triggerWake() { wake(); },
                doors, frog, moth, archive, noteOf, frogCroak, mothTick,
+               get worldIndex() { return worldIndex; }, get worldName() { return world().name; },
+               get anchorY() { return anchorY; }, get revision() { return worldRevision; },
+               get mothCarrying() { return mothCarrying; }, get enchantments() { return enchant.size; },
                spawnIsland, islandTick, get hidden() { return dreamHidden.length; },
                get shards() { return shards; }, set shards(v) { shards = v; updateShards(); },
                cast() { ray.setFromCamera(new THREE.Vector2(0, 0), camera);
@@ -1087,7 +1354,9 @@ function tick() {
   droneTick(playing ? dream : 0);
   skyDome.position.copy(camera.position);
   skyDome.rotation.y += dt * (0.004 + dream * 0.05); // the sky wheels faster as you sink
-  skyMat.color.setHSL(0.76, dream * 0.5, 1 - dream * 0.4); // the fruit sours as you sink
+  skyMat.uniforms.dream.value = dream;
+  skyMat.uniforms.time.value = uTime.value;
+  bloom.strength = 0.28 + dream * 0.22;
   after.uniforms.damp.value = dream < 0.25 ? 0 : 0.45 + dream * 0.5; // trails fade in mid-dream
   sky.lerpColors(skyLucid, skyDream, dream);
   scene.background.copy(sky); scene.fog.color.copy(sky);
